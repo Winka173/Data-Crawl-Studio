@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import type { AccountEntryView, AccountKey, AccountKind, AccountStatus } from '../../shared/contracts';
 import type { AppContext } from './context';
 import { log } from './log';
+import { ytApiBase } from './platforms/youtube/client';
 import { QuotaExceededError } from './platforms/youtube/quota';
 import { checkValue, SALT_KEY } from './privacy/pseudonym';
 
@@ -158,7 +159,7 @@ async function testYoutubeKey(ctx: AppContext): Promise<TestResult> {
     if (e instanceof QuotaExceededError) return { status: 'set', message: 'quota exhausted; test again after reset' };
     throw e;
   }
-  const url = `https://www.googleapis.com/youtube/v3/i18nLanguages?part=snippet&hl=en&key=${encodeURIComponent(key)}`;
+  const url = `${ytApiBase()}/i18nLanguages?part=snippet&hl=en&key=${encodeURIComponent(key)}`;
   const res = await ctx.fetch(url);
   if (res.ok) return { status: 'verified' };
   const body = (await res.json().catch(() => ({}))) as { error?: { errors?: { reason?: string }[]; message?: string } };

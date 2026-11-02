@@ -16,7 +16,7 @@ export function pacificDay(d = new Date()): string {
 /** Next Pacific midnight as UTC ISO (plus a 2-minute margin). */
 export function nextQuotaReset(d = new Date()): string {
   const today = pacificDay(d);
-  let t = d.getTime();
+  let t = Math.floor(d.getTime() / 60_000) * 60_000;
   // Step forward in 15-minute increments until the Pacific date changes; DST-safe without tz math.
   while (pacificDay(new Date(t)) === today) t += 15 * 60_000;
   // Walk back to the exact boundary minute.

@@ -56,9 +56,16 @@ export const ctx = { dataDir, shotDir, check, waitFor };
 async function main() {
   if (!fs.existsSync(exe)) throw new Error(`build first: ${exe} not found`);
   console.log(`exe: ${exe}\ndata: ${dataDir}\nshots: ${shotDir}`);
+  const mods = [];
+  const extraEnv = {};
+  for (const s of slices) {
+    const mod = await import(`./smoke/slice${s}.mjs`);
+    mods.push([s, mod]);
+    if (mod.env) Object.assign(extraEnv, await mod.env());
+  }
   const before = new Set(workerPids());
   const app = spawn(exe, [], {
-    env: { ...process.env, DCS_DATA_DIR: dataDir, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}` },
+    env: { ...process.env, ...extraEnv, DCS_DATA_DIR: dataDir, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}` },
     stdio: 'ignore',
   });
   const started = Date.now();
@@ -93,6 +100,7 @@ async function main() {
       check('worker exits with the app', gone);
       check('worker released its lock', !fs.existsSync(path.join(dataDir, 'worker.lock')));
     }
+    for (const [, mod] of mods) mod.cleanup?.();
   }
   const failed = results.filter((r) => !r.ok);
   fs.writeFileSync(path.join(shotDir, 'results.json'), JSON.stringify(results, null, 2));

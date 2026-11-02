@@ -1,22 +1,16 @@
-import { createContext, type AppContext } from './context';
+import { createContext } from './context';
 import { openDatabase } from './db/db';
 import { acquireLock } from './lock';
 import { log } from './log';
 import { ensureDirs, resolvePaths } from './paths';
+import './platforms/youtube/jobs';
+import { QueueRunner } from './queue/runner';
 import { SecretStore } from './secrets/store';
-import { buildControlRouter, startControlServer, type RouteInstaller } from './server/control';
+import { buildControlRouter, startControlServer } from './server/control';
+import { installCrawlRoutes } from './server/routes';
 
 declare const __DCS_VERSION__: string | undefined;
 const VERSION = typeof __DCS_VERSION__ === 'string' ? __DCS_VERSION__ : 'dev';
-
-// Feature modules register their control routes and background services here.
-export interface Service {
-  name: string;
-  start(ctx: AppContext): void | Promise<void>;
-  stop?(): void | Promise<void>;
-}
-const routeInstallers: RouteInstaller[] = [];
-const services: Service[] = [];
 
 async function main(): Promise<void> {
   const paths = resolvePaths();
@@ -31,24 +25,20 @@ async function main(): Promise<void> {
   const ctx = createContext({ version: VERSION, paths, db, secrets });
   ctx.pseudonymizer(); // creates the salt on first run so its status is visible in Accounts & Keys
 
-  const server = await startControlServer(buildControlRouter(ctx, routeInstallers), {
+  const runner = new QueueRunner(ctx);
+  const server = await startControlServer(buildControlRouter(ctx, [(r) => installCrawlRoutes(r, ctx, runner)]), {
     port: process.env.DCS_CONTROL_PORT ? Number(process.env.DCS_CONTROL_PORT) : undefined,
     token: process.env.DCS_CONTROL_TOKEN,
   });
-  for (const s of services) await s.start(ctx);
+  runner.start();
 
   let stopping = false;
   const shutdown = async (why: string) => {
     if (stopping) return;
     stopping = true;
     log.info('worker stopping', { why });
-    for (const s of [...services].reverse()) {
-      try {
-        await s.stop?.();
-      } catch (e) {
-        log.error('service stop failed', { service: s.name, e });
-      }
-    }
+    // Running jobs are aborted and re-queued with their cursor; they resume on next start.
+    await runner.stop().catch((e) => log.error('queue stop failed', e));
     await server.close();
     db.close();
     releaseLock();

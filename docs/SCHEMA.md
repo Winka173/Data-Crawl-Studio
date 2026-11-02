@@ -50,7 +50,11 @@ Every crawled source: a channel, playlist, video, group, page or IG account.
 | created_at, updated_at | TEXT | |
 
 ### crawl_runs
-One row per crawl of a source (`mode` = `initial`|`incremental`, `trigger` = `add`|`manual`|`schedule`). `stats_json` holds counters such as `{"postsNew":3,"postsUpdated":10,"commentsNew":120,"apiUnits":42}`.
+One row per crawl of a source.
+- `mode` = `initial`|`incremental`.
+- `trigger` = `add`|`manual`|`schedule`.
+- `status` = `running`|`done`|`partial` (some jobs failed)|`failed`|`cancelled`.
+- `stats_json` holds counters: `postsNew`, `postsUpdated`, `postsUnavailable`, `commentsNew`, `commentsUpdated`, `commentsUnavailable`, `apiUnits`.
 
 ### jobs
 The durable work queue. Each job carries its own `cursor_json`/`checkpoint_json` (e.g. a page token), so it resumes where it stopped after a crash or restart. `attempts`/`max_attempts`/`next_run_at` implement bounded retries with backoff. Only one active job may exist per `(source_id, type, target)`.
@@ -95,6 +99,17 @@ Same identity, timestamp and privacy rules as `posts`, plus:
 | like_count | likes / total reactions |
 | reply_count | replies as reported by the platform |
 | reactions_json | per-reaction counts where available |
+
+### YouTube specifics
+- Comment depth is 0 (top-level) or 1 (reply). The platform has no deeper nesting.
+- `post_type` is `video` or `live`; the API does not mark Shorts.
+- `posts.extra_json` may contain:
+  - `categoryId`, `liveBroadcastContent`, `defaultLanguage`, `defaultAudioLanguage`, `caption`, `definition`, `liveActualStart`;
+  - `commentsDisabled: true` when the video has comments turned off.
+- `comments.reply_count` on a top-level comment is the platform's `totalReplyCount`.
+- Media refs per video:
+  - one `video` row: the watch URL plus the duration;
+  - one `thumbnail` row: the best available thumbnail URL plus its size.
 
 ### media_refs
 URLs and metadata of images, videos and thumbnails. Files are **never downloaded**.

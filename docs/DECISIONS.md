@@ -55,3 +55,43 @@ React 19 + Vite, plain CSS with light/dark tokens, no component library. Hash-ba
 
 ## D12. Smoke tests drive the real built app
 `scripts/smoke.mjs` launches `target/release/data-crawl-studio.exe` with `DCS_DATA_DIR` pointing to a scratch folder and WebView2 remote debugging on port 9338. It then drives the UI with Playwright over CDP, takes screenshots and closes the app with a normal window close. The owner's real data folder is never used by tests.
+
+## D13. Durable queue: one lane per platform
+At most one job per platform runs at a time: one tab per platform for browser work, and simple, predictable quota use for YouTube. Different platforms run in parallel.
+- **Failure handling** is decided by the error class (`worker/src/queue/errors.ts`):
+
+  | Error | What happens |
+  |---|---|
+  | transient | retried with backoff from 30 s, doubling, capped at 30 min, ±20 % jitter; at most 5 attempts |
+  | quota / pacing | the job waits until the reset; no attempt is used |
+  | auth / block | the platform stops and all its active jobs become Paused (Needs user) |
+  | parser | the source is flagged "Parser needs update"; nothing is stored |
+  | not-found / permanent | the job fails without retry |
+
+- A job saves its cursor after each page. A crash or restart sets `running` jobs back to `queued`, and they continue from the cursor.
+- A crawl run ends when none of its jobs is active. Its status is `done`, `partial` (some jobs failed) or `failed`.
+
+## D14. YouTube collection rules
+- **Channels:** the uploads playlist (newest first) is listed until a whole page is older than the cutoff. **Playlists** are listed completely, because their order is arbitrary, and filtered by date. A pasted **video** is always re-checked.
+- **Cutoff:**
+  - First crawl: the chosen depth (or no cutoff for all history).
+  - Later runs: the older of (last success − 1 day) and (now − recheck days, default 14). New posts since the last run are always reached, and recent posts are re-checked.
+- **Comments are re-synced** when:
+  - the post is new; or
+  - it is inside the recheck window and its comment count changed or the last full sync is older than 24 h; or
+  - it was never fully synced.
+- **Every reply is fetched:** the `commentThreads` payload carries at most a few replies, so any thread with more pages through `comments.list`.
+- **Deletion detection** runs only after a complete listing:
+  - top-level comments of a video, and replies of a thread, that were not seen in that pass get `unavailable_at`;
+  - posts of the source inside the window that the listing no longer returns are checked with `videos.list`, and those missing are marked unavailable.
+- **Edits:** `is_edited` = the API's `updatedAt` ≠ `publishedAt`. A text change observed between runs is written to `edit_history`.
+- **YouTube comments are two levels deep** (the API flattens deeper replies): depth 0 = top-level, depth 1 = reply. Replies to replies appear as depth-1 replies that start with an @mention.
+
+## D15. Mentions in YouTube descriptions
+An @handle in a video description might be a person or another public channel, and the API cannot tell which. Every mention except the crawled channel's own handle is pseudonymised. This errs on the side of privacy.
+
+## D16. Raw payloads are scrubbed before storage
+Comment payloads drop the author name, avatar and channel URL, the author ID becomes the pseudonym, and the text is the pseudonymised text. Video payloads get the pseudonymised description. A test scans every table for raw viewer IDs and handles.
+
+## D17. Test-only API base override
+`DCS_YOUTUBE_API_BASE` points the collector at a local fake server (`scripts/fake-youtube-server.ts`, synthetic data only). The smoke test uses it to drive a full crawl through the built `.exe`. Normal use never sets it.

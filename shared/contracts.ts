@@ -75,3 +75,128 @@ export interface ApiError {
   /** i18n key when the message is user-facing */
   code?: string;
 }
+
+// ---- Sources, jobs, status, data browser (slice 2+) ---------------------------------
+
+export interface SourceView {
+  id: number;
+  platform: Platform;
+  kind: string;
+  input_url: string;
+  canonical_url: string | null;
+  platform_id: string | null;
+  name: string | null;
+  method: 'api' | 'browser';
+  depth_days: number | null;
+  schedule_minutes: number | null;
+  status: string;
+  status_detail: string | null;
+  paused: number;
+  initial_crawl_done: number;
+  last_run_started_at: string | null;
+  last_run_finished_at: string | null;
+  last_success_at: string | null;
+  next_run_at: string | null;
+  created_at: string;
+  posts: number;
+  comments: number;
+  active_jobs: number;
+  last_run_status: string | null;
+  last_run_stats: Record<string, number> | null;
+}
+
+export interface AddSourcesResult {
+  added: SourceView[];
+  duplicates: string[];
+  errors: { input: string; code: string }[];
+}
+
+export interface JobView {
+  id: number;
+  run_id: number | null;
+  source_id: number | null;
+  source_name: string | null;
+  platform: Platform;
+  type: string;
+  target: string | null;
+  state: string;
+  priority: number;
+  attempts: number;
+  max_attempts: number;
+  next_run_at: string;
+  last_error: string | null;
+  updated_at: string;
+  started_at: string | null;
+}
+
+export interface PlatformStateView {
+  platform: Platform | 'global';
+  paused: boolean;
+  needsUser: boolean;
+  reason: string | null;
+  detail: string | null;
+}
+
+export interface QuotaView {
+  day: string;
+  limit: number;
+  reserve: number;
+  used: number;
+  remaining: number;
+  exhausted: boolean;
+  resetsAt: string;
+  byMethod: Record<string, number>;
+}
+
+export interface StatusView {
+  platforms: PlatformStateView[];
+  running: JobView[];
+  queueCounts: { platform: Platform; state: string; n: number }[];
+  quota: QuotaView;
+  totals: { sources: number; posts: number; comments: number; pseudonyms: number };
+  recentErrors: { occurred_at: string; platform: string | null; kind: string; code: string | null; message: string; source_id: number | null }[];
+}
+
+export interface PostListItem {
+  id: number;
+  platform: Platform;
+  platform_id: string;
+  post_type: string;
+  url: string | null;
+  container_name: string | null;
+  author_kind: string;
+  author_entity_name: string | null;
+  author_pseudonym: string | null;
+  title: string | null;
+  text: string | null;
+  published_at: string | null;
+  like_count: number | null;
+  comment_count: number | null;
+  view_count: number | null;
+  share_count: number | null;
+  stored_comments: number;
+  unavailable_at: string | null;
+}
+
+export interface CommentView {
+  id: number;
+  parent_id: number | null;
+  depth: number;
+  author_kind: string;
+  author_entity_name: string | null;
+  author_pseudonym: string | null;
+  text: string | null;
+  published_at: string | null;
+  is_edited: number;
+  like_count: number | null;
+  reply_count: number | null;
+  unavailable_at: string | null;
+}
+
+export interface PostDetail {
+  post: PostListItem & { extra_json: string | null; tags_json: string | null; duration_seconds: number | null; first_seen_at: string; last_seen_at: string; is_edited: number };
+  media: { media_type: string; url: string; width: number | null; height: number | null; duration_seconds: number | null; alt_text: string | null }[];
+  snapshots: { observed_at: string; like_count: number | null; comment_count: number | null; view_count: number | null }[];
+  comments: CommentView[];
+  commentsTotal: number;
+}
