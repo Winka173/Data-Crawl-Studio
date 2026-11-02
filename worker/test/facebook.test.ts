@@ -4,7 +4,7 @@ import { Pacer } from '../src/browser/pacing';
 import type { AppContext } from '../src/context';
 import { detectBlockInPage, detectBlockInResponse } from '../src/platforms/facebook/detect';
 import { isPostMedia } from '../src/platforms/facebook/driver';
-import { decodeCommentId, extractFrom, parseJsonDocuments, safeMediaUrl } from '../src/platforms/facebook/extract';
+import { decodeCommentId, extractFrom, feedPageInfo, feedRequestVariables, parseJsonDocuments, safeMediaUrl } from '../src/platforms/facebook/extract';
 import { orderByParent, setFbDriver, timing } from '../src/platforms/facebook/jobs';
 import { mapFbPost, pseudonymizeFbText, validateBatch } from '../src/platforms/facebook/map';
 import '../src/platforms/youtube/jobs';
@@ -114,6 +114,26 @@ describe('browser tab resources', () => {
     expect(isPostMedia('https://www.facebook.com/captcha/tfbimage/?x=1', 'image')).toBe(false);
     expect(isPostMedia('https://scontent.fsgn5-13.fna.fbcdn.net/v/t39/1_n.jpg', 'xhr')).toBe(false);
     expect(isPostMedia('not a url', 'image')).toBe(false);
+  });
+});
+
+describe('feed position in GraphQL answers (D31)', () => {
+  const story = { __typename: 'Story', post_id: '1' };
+  it('reads the page info beside Story edges, also from a deferred chunk, and ignores other connections', () => {
+    expect(feedPageInfo({ data: { node: { group_feed: { edges: [{ node: story }], page_info: { end_cursor: 'AQHabc', has_next_page: true } } } } })).toEqual({ cursor: 'AQHabc', hasNext: true });
+    expect(feedPageInfo({ label: 'GroupsCometFeedRegularStories_paginationGroup$defer$page_info', path: ['node', 'group_feed'], data: { page_info: { end_cursor: 'AQHdef', has_next_page: false } } })).toEqual({ cursor: 'AQHdef', hasNext: false });
+    // Comments and suggestion lists page too, but not through Story edges.
+    expect(feedPageInfo({ data: { node: { comments: { edges: [{ node: { __typename: 'Comment' } }], page_info: { end_cursor: 'x', has_next_page: true } } } } })).toBeNull();
+    expect(feedPageInfo({ label: 'CommentsList$defer', path: ['node', 'comments'], data: { page_info: { end_cursor: 'x', has_next_page: true } } })).toBeNull();
+    expect(feedPageInfo({ data: { node: { group_feed: { edges: [{ node: story }], page_info: { end_cursor: null, has_next_page: false } } } } })).toEqual({ cursor: null, hasNext: false });
+  });
+
+  it('recognises a replayable feed request by its cursor variable', () => {
+    const body = new URLSearchParams({ fb_api_req_friendly_name: 'GroupsCometFeedRegularStoriesPaginationQuery', variables: JSON.stringify({ count: 3, cursor: 'AQH1', id: '364997627165697' }), __req: '1f' }).toString();
+    expect(feedRequestVariables(body)).toMatchObject({ cursor: 'AQH1', id: '364997627165697' });
+    expect(feedRequestVariables(new URLSearchParams({ variables: JSON.stringify({ id: '1' }) }).toString())).toBeNull();
+    expect(feedRequestVariables('variables=%7Bbroken')).toBeNull();
+    expect(feedRequestVariables(null)).toBeNull();
   });
 });
 
@@ -388,6 +408,60 @@ describe('Facebook group collection with a fake browser', () => {
     for (const bad of [0, -1, 3651, 1.5, '30' as never]) {
       expect(() => addSources(app, { links: 'https://www.facebook.com/groups/222/', depthDays: bad })).toThrow(/depthDays/);
     }
+  });
+
+  describe('feed paging through the page\'s own requests (D31)', () => {
+    const add = () => addSources(app, { links: `https://www.facebook.com/groups/${GROUP_SLUG}/`, depthDays: 365, collectComments: false });
+    const groupJob = () => app.db.prepare(`SELECT state, cursor_json FROM jobs WHERE type = 'fb.group' ORDER BY id DESC LIMIT 1`).get() as { state: string; cursor_json: string | null };
+
+    it('scrolls once, then follows the feed page by page to its end', async () => {
+      setup({ feedApi: true, perScreen: 2 });
+      add();
+      await runAll();
+      expect(count('SELECT COUNT(*) n FROM posts')).toBe(12);
+      expect(fake.scrolls).toBe(1);
+      expect(fake.fetched).toEqual(['c4', 'c6', 'c8', 'c10']); // c12 is never asked for: Facebook said there is no next page
+      expect(groupJob()).toEqual({ state: 'done', cursor_json: null }); // a finished pass leaves no position behind
+    });
+
+    it('an interrupted pass resumes at its saved position instead of the top', async () => {
+      setup({ feedApi: true, perScreen: 2, transientAtFetch: 3 });
+      add();
+      await runner.drain();
+      expect(JSON.parse(groupJob().cursor_json!)).toMatchObject({ feedCursor: 'c8' });
+      await runAll(); // the retry
+      expect(count('SELECT COUNT(*) n FROM posts')).toBe(12);
+      expect(fake.fetched).toEqual(['c4', 'c6', 'c8', 'c8', 'c10']); // after the failure: c8 again, never c4/c6
+      expect(fake.opened.filter((u) => !u.includes('/posts/'))).toHaveLength(2);
+      expect(groupJob().state).toBe('done');
+    });
+
+    it('a request that cannot be followed is refreshed with a new page view, then the listing falls back to scrolling', async () => {
+      setup({ feedApi: true, perScreen: 2, failFetch: 'always' });
+      add();
+      await runAll();
+      expect(count('SELECT COUNT(*) n FROM posts')).toBe(12); // nothing lost
+      expect(fake.fetched).toEqual(['c4', 'c4', 'c4']); // the same position after each refresh
+      expect(fake.opened.filter((u) => !u.includes('/posts/'))).toHaveLength(3); // first view + 2 refreshes
+      expect(fake.diagnosed).toContain('feed_fetch_failed');
+      expect(groupJob().state).toBe('done');
+    });
+
+    it('one failed request does not end paging: a refresh and the pass goes on from the same place', async () => {
+      setup({ feedApi: true, perScreen: 2, failFetch: [2] });
+      add();
+      await runAll();
+      expect(count('SELECT COUNT(*) n FROM posts')).toBe(12);
+      expect(fake.fetched).toEqual(['c4', 'c6', 'c6', 'c8', 'c10']);
+    });
+
+    it('the depth cutoff still ends a paged listing', async () => {
+      setup({ feedApi: true, perScreen: 2 });
+      addSources(app, { links: `https://www.facebook.com/groups/${GROUP_SLUG}/`, depthDays: 30, collectComments: false });
+      await runAll();
+      expect(count('SELECT COUNT(*) n FROM posts')).toBe(9);
+      expect(fake.fetched.length).toBeLessThan(5);
+    });
   });
 
   it('a checkpoint stops Facebook at once, marks its jobs Paused (Needs user), leaves YouTube running', async () => {

@@ -10,7 +10,7 @@ import type { SourceRow } from '../../sources/types';
 import type { CommentRecord } from '../../store/records';
 import { markPostUnavailable, markUnseenCommentsOfPost, saveRawPayload, upsertComment, upsertPost } from '../../store/upsert';
 import { daysAgoIso, nowIso } from '../../util/time';
-import type { FbDriver } from './driver';
+import { FeedFetchError, type FbDriver } from './driver';
 import { emptyExtracted, FB_PARSER_VERSION, groupUrl, pickGroup, postUrl, type FbCommentCandidate, type FbPostCandidate } from './extract';
 import { mapFbComment, mapFbPost, validateBatch, type FbContainer } from './map';
 
@@ -21,7 +21,7 @@ export const JOB_FB_COMMENTS = 'fb.comments';
 /** Replaced in tests. */
 export const timing = { sleep: abortableSleep };
 
-export const LIMITS = { maxScrolls: 20_000, idleScrolls: 8, olderInARow: 3, maxExpandClicks: 600, idleExpandClicks: 5, maxCommentScrolls: 300, idleCommentScrolls: 2 };
+export const LIMITS = { maxScrolls: 20_000, idleScrolls: 8, olderInARow: 3, maxExpandClicks: 600, idleExpandClicks: 5, maxCommentScrolls: 300, idleCommentScrolls: 2, feedFetchFailures: 3 };
 
 // Wired in main.ts (Playwright) and in tests (fake driver).
 let driverFactory: ((app: AppContext) => FbDriver) | null = null;
@@ -40,6 +40,8 @@ registerSourceKind('fb_group', { method: 'browser', startJob: JOB_FB_GROUP });
 interface GroupCursor {
   cutoff: string | null;
   passStartedAt: string;
+  /** Deepest feed position reached by this pass (D31): an interrupted pass resumes here, not at the top. */
+  feedCursor?: string | null;
 }
 
 function getSource(jc: JobContext): SourceRow {
@@ -106,6 +108,11 @@ async function collectGroup(jc: JobContext, d: FbDriver): Promise<void> {
   const seen = new Set<string>();
   let idle = 0;
   let olderInARow = 0;
+  // Feed paging (D31): after the first scroll the page's own feed request is followed with the next cursor, so the
+  // tab does not grow and an interrupted pass resumes at its saved position.
+  let resumeFrom = cur.feedCursor ?? null;
+  let fetchFailures = 0;
+  let fetching = !!d.fetchFeedPage && !!d.feedState;
 
   for (let i = 0; i <= LIMITS.maxScrolls; i++) {
     jc.throwIfAborted();
@@ -114,10 +121,44 @@ async function collectGroup(jc: JobContext, d: FbDriver): Promise<void> {
     const inRange = fresh.filter((c) => cutoffMs === null || c.createdTime === null || c.createdTime * 1000 >= cutoffMs);
     storePosts(jc, source, container, inRange, p, recheckFrom);
 
+    const feed = fetching ? d.feedState!(group.id) : null;
+    // Save the position only once past a pending resume point, so the deeper saved one is never overwritten.
+    if (feed?.cursor && !resumeFrom) jc.saveCursor({ ...cur, feedCursor: feed.cursor });
+
     // Pinned posts can be old: only a run of several consecutive old posts ends the listing.
     for (const c of fresh) olderInARow = cutoffMs !== null && c.createdTime !== null && c.createdTime * 1000 < cutoffMs ? olderInARow + 1 : 0;
     idle = fresh.length ? 0 : idle + 1;
     if (olderInARow >= LIMITS.olderInARow || idle >= LIMITS.idleScrolls || i === LIMITS.maxScrolls) break;
+    if (feed && !resumeFrom && !feed.hasNext) break; // Facebook says the feed has no further page
+
+    const from = feed ? resumeFrom ?? feed.cursor : null;
+    if (from) {
+      try {
+        await fetchKeepingPlace(jc, d, from, ex);
+        resumeFrom = null;
+        fetchFailures = 0;
+        await d.drain(ex);
+        continue;
+      } catch (e) {
+        if (!(e instanceof FeedFetchError)) throw e;
+        fetchFailures++;
+        log.warn('facebook feed request could not be followed', { job: jc.job.id, failures: fetchFailures, e: e.message });
+        if (fetchFailures < LIMITS.feedFetchFailures) {
+          // Usually stale tokens: a fresh page view brings a fresh request to follow; the position is kept.
+          resumeFrom = from;
+          await d.open(groupUrl(group.id), ex, jc.signal);
+          await d.drain(ex);
+          continue;
+        }
+        // Give up on paging for this pass and scroll as before, from the top of the reopened page. Posts seen
+        // before count as new again (re-storing is idempotent), or re-scrolling them would read as the feed's end.
+        await d.diagnose?.('feed_fetch_failed', { job: JOB_FB_GROUP, failures: fetchFailures });
+        fetching = false;
+        resumeFrom = null;
+        seen.clear();
+        idle = 0;
+      }
+    }
     await scrollKeepingPlace(jc, d);
     await d.drain(ex);
   }
@@ -137,6 +178,21 @@ async function scrollKeepingPlace(jc: JobContext, d: FbDriver): Promise<void> {
   for (;;) {
     try {
       await d.scroll(jc.signal);
+      return;
+    } catch (e) {
+      if (!(e instanceof PacingWaitError)) throw e;
+      const ms = Math.max(1000, Date.parse(e.resumeAt) - Date.now());
+      log.info('facebook listing waits for the pacing cap, keeping its place', { job: jc.job.id, until: e.resumeAt });
+      await timing.sleep(ms, jc.signal);
+    }
+  }
+}
+
+/** One feed page through the page's own request, waiting in place for the pacing cap like a scroll does. */
+async function fetchKeepingPlace(jc: JobContext, d: FbDriver, cursor: string, ex: ReturnType<typeof emptyExtracted>): Promise<void> {
+  for (;;) {
+    try {
+      await d.fetchFeedPage!(cursor, ex, jc.signal);
       return;
     } catch (e) {
       if (!(e instanceof PacingWaitError)) throw e;

@@ -5,7 +5,7 @@ import { ShapeBook } from '../../browser/shapes';
 import { log } from '../../log';
 import { BlockedError } from '../../queue/errors';
 import { detectBlockInPage, detectBlockInResponse } from './detect';
-import { extractFrom, parseJsonDocuments, SELECTORS, type Extracted } from './extract';
+import { extractFrom, feedPageInfo, feedRequestVariables, parseJsonDocuments, SELECTORS, type Extracted, type FeedPage } from './extract';
 
 export interface Snapshot {
   url: string;
@@ -31,7 +31,27 @@ export interface FbDriver {
   loggedIn(): Promise<boolean>;
   /** Write a value-free summary of the JSON seen since the last open() (for parser fixes). Returns the file path. */
   diagnose?(reason: string, extra?: Record<string, unknown>): Promise<string | null>;
+  /**
+   * Feed paging without scrolling (D31). Once the page itself has requested a page of this group's feed, returns the
+   * latest feed position; null until then (and after every open()).
+   */
+  feedState?(groupId: string): FeedPage | null;
+  /** Fetch the feed page after `cursor` the way the page does (one paced action); its posts go into `into`. */
+  fetchFeedPage?(cursor: string, into: Extracted, signal: AbortSignal): Promise<FeedPage>;
 }
+
+/** The page's own feed request could not be replayed (stale tokens, changed shape, unexpected answer). */
+export class FeedFetchError extends Error {}
+
+interface FeedTemplate {
+  url: string;
+  params: string;
+  headers: Record<string, string>;
+  vars: Record<string, unknown>;
+}
+
+/** Request headers worth copying; the browser sets the rest (cookies, origin, user agent, ...) itself. */
+const REPLAY_HEADERS = new Set(['content-type', 'x-fb-friendly-name', 'x-fb-lsd', 'x-asbd-id']);
 
 /**
  * Photos and videos of posts (scontent / video *.fbcdn.net). The collector reads media URLs from the page's JSON and
@@ -49,11 +69,16 @@ export function isPostMedia(url: string, resourceType: string): boolean {
 
 export class PlaywrightFbDriver implements FbDriver {
   private pending: Promise<void>[] = [];
-  private bodies: { status: number; text: string }[] = [];
+  private bodies: { status: number; text: string; req: { url: string; postData: string | null; headers: Record<string, string> } }[] = [];
   private page: Page | null = null;
   private listener = (r: Response) => this.onResponse(r);
   private shapes = new ShapeBook();
   private lastMenu: string[] = [];
+  private feedTpl: FeedTemplate | null = null;
+  private feed: FeedPage | null = null;
+  private reqSeq: number | null = null;
+  /** Bodies of our own replayed requests: their responses are handled in fetchFeedPage, not again in drain. */
+  private replayed = new Set<string>();
 
   constructor(private readonly browser: BrowserManager, private readonly pacer: Pacer, private readonly diagDir?: string) {}
 
@@ -87,12 +112,69 @@ export class PlaywrightFbDriver implements FbDriver {
   private onResponse(r: Response): void {
     const url = r.url();
     if (!url.includes('/api/graphql') && !url.includes('/ajax/')) return;
+    const req = r.request();
+    const postData = req.method() === 'POST' ? req.postData() : null;
+    if (postData && this.replayed.delete(postData)) return;
     this.pending.push(
       r.text().then(
-        (text) => void this.bodies.push({ status: r.status(), text }),
+        (text) => void this.bodies.push({ status: r.status(), text, req: { url, postData, headers: req.headers() } }),
         () => undefined,
       ),
     );
+  }
+
+  feedState(groupId: string): FeedPage | null {
+    if (!this.feedTpl || !this.feed) return null;
+    // Only the group's own feed: other connections on the page (suggested groups, ...) also page through stories.
+    return JSON.stringify(this.feedTpl.vars).includes(groupId) ? this.feed : null;
+  }
+
+  async fetchFeedPage(cursor: string, into: Extracted, signal: AbortSignal): Promise<FeedPage> {
+    const tpl = this.feedTpl;
+    if (!tpl) throw new FeedFetchError('no feed request to follow yet');
+    const page = await this.tab();
+    await this.pacer.beforeAction('facebook', signal);
+    const params = new URLSearchParams(tpl.params);
+    params.set('variables', JSON.stringify({ ...tpl.vars, cursor }));
+    // __req is the page's request counter (base 36): keep counting instead of repeating one value.
+    const req = params.get('__req');
+    if (req && /^[0-9a-z]+$/.test(req)) {
+      this.reqSeq = Math.max(this.reqSeq ?? 0, parseInt(req, 36)) + 1;
+      params.set('__req', this.reqSeq.toString(36));
+    }
+    const body = params.toString();
+    this.replayed.add(body);
+    let res: { status: number; text: string };
+    try {
+      res = await page.evaluate(
+        async ({ url, body, headers }) => {
+          const r = await fetch(url, { method: 'POST', body, headers, credentials: 'include' });
+          return { status: r.status, text: await r.text() };
+        },
+        { url: tpl.url, body, headers: tpl.headers },
+      );
+    } catch (e) {
+      this.replayed.delete(body);
+      throw new FeedFetchError(`feed request failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const docs = parseJsonDocuments(res.text);
+    const blocked = async (code: string, evidence: string): Promise<never> => {
+      // Show the owner what Facebook answered: the checkpoint or notice appears on a normal page load.
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => undefined);
+      throw new BlockedError(`Facebook: ${code} (${evidence})`, code);
+    };
+    if (res.status === 429) await blocked('rate_limited', 'HTTP 429');
+    let fp: FeedPage | null = null;
+    for (const doc of docs) {
+      const hit = detectBlockInResponse(res.status, doc);
+      if (hit) await blocked(hit.code, hit.evidence);
+      this.shapes.add(doc);
+      extractFrom(doc, into);
+      fp = feedPageInfo(doc) ?? fp;
+    }
+    if (!fp) throw new FeedFetchError(`no feed page in the answer (HTTP ${res.status}, ${docs.length} JSON documents)`);
+    this.feed = fp;
+    return fp;
   }
 
   /**
@@ -129,6 +211,9 @@ export class PlaywrightFbDriver implements FbDriver {
     await this.pacer.beforeAction('facebook', signal);
     this.shapes.clear();
     this.lastMenu = [];
+    // A new page view: its feed requests (and tokens) replace the old ones.
+    this.feedTpl = null;
+    this.feed = null;
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     await page.waitForSelector(`${SELECTORS.feed}, ${SELECTORS.article}`, { timeout: 15_000 }).catch(() => undefined);
     await this.assertNotBlocked();
@@ -235,11 +320,20 @@ export class PlaywrightFbDriver implements FbDriver {
     this.bodies = [];
     for (const b of bodies) {
       const docs = parseJsonDocuments(b.text);
+      let fp: FeedPage | null = null;
       for (const doc of docs) {
         const hit = detectBlockInResponse(b.status, doc);
         if (hit) throw new BlockedError(`Facebook: ${hit.code} (${hit.evidence})`, hit.code);
         this.shapes.add(doc);
         extractFrom(doc, into);
+        fp = feedPageInfo(doc) ?? fp;
+      }
+      // A feed page the page itself requested: remember where the feed is, and how to ask for the next page.
+      const vars = fp && b.status === 200 ? feedRequestVariables(b.req.postData) : null;
+      if (fp && vars) {
+        this.feed = fp;
+        const headers = Object.fromEntries(Object.entries(b.req.headers).filter(([k]) => REPLAY_HEADERS.has(k.toLowerCase())));
+        this.feedTpl = { url: b.req.url, params: b.req.postData!, headers, vars };
       }
       if (!docs.length && b.status === 429) throw new BlockedError('Facebook: rate_limited (HTTP 429)', 'rate_limited');
     }

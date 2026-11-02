@@ -2,10 +2,10 @@
 // No real people, groups or posts. Names exist ONLY to prove they never reach the database.
 
 import type { Pacer } from '../../../src/browser/pacing';
-import type { FbDriver, Snapshot } from '../../../src/platforms/facebook/driver';
+import { FeedFetchError, type FbDriver, type Snapshot } from '../../../src/platforms/facebook/driver';
 import { detectBlockInPage, detectBlockInResponse } from '../../../src/platforms/facebook/detect';
-import { extractFrom, type Extracted } from '../../../src/platforms/facebook/extract';
-import { BlockedError } from '../../../src/queue/errors';
+import { extractFrom, type Extracted, type FeedPage } from '../../../src/platforms/facebook/extract';
+import { BlockedError, TransientError } from '../../../src/queue/errors';
 
 export const GROUP_ID = '900000000000001';
 export const GROUP_SLUG = 'synthetic.test.group';
@@ -193,6 +193,12 @@ export interface FakeFbOptions {
   deadExpandButton?: boolean;
   /** Like the 2026 permalink page: only this many top-level comments at first, the rest load as the page scrolls. */
   commentsPerScreen?: number;
+  /** Feed paging (D31): after the first scroll the feed can be followed page by page with cursors "c<index>". */
+  feedApi?: boolean;
+  /** Feed page requests (1-based count over the driver's life) that fail as a stale/unknown request would. */
+  failFetch?: 'always' | number[];
+  /** Feed page request (1-based) that fails like a network error: the job is retried later. */
+  transientAtFetch?: number;
   pacer?: Pacer;
 }
 
@@ -200,6 +206,11 @@ export class FakeFbDriver implements FbDriver {
   actions = 0;
   opened: string[] = [];
   diagnosed: string[] = [];
+  scrolls = 0;
+  /** Cursor of every feed page request, in order. */
+  fetched: string[] = [];
+  /** Feed position reached through the page's own scrolling; null until the first scroll after open(). */
+  private uiFeed: FeedPage | null = null;
   private screen = 0;
   private queue: unknown[] = [];
   private expandQueue: unknown[] = [];
@@ -265,6 +276,7 @@ export class FakeFbDriver implements FbDriver {
       return { url, hasFeed: false, articleCount: 1, notAvailable: false };
     }
     this.screen = 0;
+    this.uiFeed = null;
     const docs = this.o.brokenJson ? [] : this.o.posts.map((p) => ({ data: { node: { group_feed: { edges: [{ node: storyNode(p, this.o.now) }] } } } }));
     this.queue = docs.slice(per);
     for (const d of docs.slice(0, per)) extractFrom(d, into);
@@ -278,6 +290,7 @@ export class FakeFbDriver implements FbDriver {
 
   async scroll(signal: AbortSignal) {
     await this.act(signal, 'https://www.facebook.com/groups/x/');
+    this.scrolls++;
     if (this.opened.at(-1)?.includes('/posts/')) {
       const next = this.commentPages.shift();
       if (next) this.pending.push(next);
@@ -286,6 +299,27 @@ export class FakeFbDriver implements FbDriver {
     const per = this.o.perScreen ?? 4;
     this.pending.push(...this.queue.splice(0, per));
     this.screen++;
+    const shown = Math.min(this.o.posts.length, per * (this.screen + 1));
+    this.uiFeed = { cursor: `c${shown}`, hasNext: shown < this.o.posts.length };
+  }
+
+  feedState(groupId: string): FeedPage | null {
+    return this.o.feedApi && groupId === GROUP_ID ? this.uiFeed : null;
+  }
+
+  async fetchFeedPage(cursor: string, into: Extracted, signal: AbortSignal): Promise<FeedPage> {
+    await this.act(signal, 'https://www.facebook.com/api/graphql/');
+    this.fetched.push(cursor);
+    const n = this.fetched.length;
+    if (this.o.transientAtFetch === n) throw new TransientError('network error');
+    const f = this.o.failFetch;
+    if (f === 'always' || f?.includes(n)) throw new FeedFetchError('stale request');
+    const per = this.o.perScreen ?? 4;
+    const from = Number(cursor.slice(1));
+    for (const p of this.o.posts.slice(from, from + per)) extractFrom({ data: { node: { group_feed: { edges: [{ node: storyNode(p, this.o.now) }] } } } }, into);
+    const next = Math.min(this.o.posts.length, from + per);
+    this.uiFeed = { cursor: `c${next}`, hasNext: next < this.o.posts.length };
+    return this.uiFeed;
   }
 
   async showAllComments(signal: AbortSignal) {

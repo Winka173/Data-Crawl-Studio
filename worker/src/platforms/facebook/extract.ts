@@ -387,6 +387,56 @@ export function extractFrom(doc: unknown, into: Extracted = emptyExtracted()): E
   return into;
 }
 
+// ---- feed pagination (D31) -------------------------------------------------------------------
+
+export interface FeedPage {
+  cursor: string | null;
+  hasNext: boolean;
+}
+
+/**
+ * The feed connection's paging info in one GraphQL document: the `page_info` that sits beside `edges` holding Story
+ * nodes, or a deferred chunk (`{label, path, data: {page_info}}`) whose label or path names the feed. The last match
+ * wins (a streamed response sends the page info after the stories).
+ */
+export function feedPageInfo(doc: unknown): FeedPage | null {
+  let found: FeedPage | null = null;
+  const take = (pi: Obj) => {
+    const cursor = str(pi.end_cursor);
+    if (cursor || pi.has_next_page === false) found = { cursor, hasNext: pi.has_next_page === true && !!cursor };
+  };
+  if (isObj(doc) && isObj(doc.data) && isObj(doc.data.page_info)) {
+    const where = `${str(doc.label) ?? ''} ${Array.isArray(doc.path) ? doc.path.join('.') : ''}`;
+    if (/feed/i.test(where)) take(doc.data.page_info);
+  }
+  const stack: unknown[] = [doc];
+  let guard = 0;
+  while (stack.length && guard++ < 500_000) {
+    const v = stack.pop();
+    if (Array.isArray(v)) {
+      for (const x of v) stack.push(x);
+      continue;
+    }
+    if (!isObj(v)) continue;
+    if (Array.isArray(v.edges) && isObj(v.page_info) && v.edges.some((e) => isObj(e) && isObj(e.node) && e.node.__typename === 'Story')) {
+      take(v.page_info);
+    }
+    for (const [k, child] of Object.entries(v)) if (child && typeof child === 'object' && !BACK_POINTERS.has(k)) stack.push(child);
+  }
+  return found;
+}
+
+/** A feed page request worth replaying: a GraphQL POST whose variables hold a cursor and name the group. */
+export function feedRequestVariables(postData: string | null): Record<string, unknown> | null {
+  if (!postData) return null;
+  try {
+    const vars = JSON.parse(new URLSearchParams(postData).get('variables') ?? 'null') as unknown;
+    return isObj(vars) && 'cursor' in vars ? vars : null;
+  } catch {
+    return null;
+  }
+}
+
 function merge<T extends object>(map: Map<string, T>, id: string, cand: T): void {
   const prev = map.get(id);
   if (!prev) {
