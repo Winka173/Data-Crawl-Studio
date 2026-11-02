@@ -1,0 +1,43 @@
+# --- Never commit: secrets, cookies, browser profiles, databases, exports, crawled data ---
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+secrets.json
+*.secret
+*.dpapi
+.env
+.env.*
+cookies*
+**/profiles/
+**/browser-profile*/
+**/ms-playwright/
+exports/
+backups/
+data/
+crawl-data/
+*.jsonl
+!worker/test/fixtures/**/*.jsonl
+*.csv
+!worker/test/fixtures/**/*.csv
+logs/
+*.log
+screenshots-private/
+
+# --- Build output ---
+node_modules/
+dist-ui/
+build/
+src-tauri/target/
+src-tauri/gen/
+*.tsbuildinfo
+coverage/
+
+# --- Tooling ---
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+.claude/

@@ -1,0 +1,44 @@
+{
+  "name": "data-crawl-studio",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Windows desktop crawler for public social data (collect, store, deliver).",
+  "type": "module",
+  "scripts": {
+    "dev:worker": "tsx worker/src/main.ts",
+    "dev:ui": "vite",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p worker/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "build:ui": "vite build",
+    "build:worker": "node scripts/build-worker.mjs",
+    "build": "npm run typecheck && npm run build:ui && npm run build:worker",
+    "tauri": "tauri",
+    "desktop:build": "tauri build",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.4",
+    "better-sqlite3": "^12.11.1",
+    "koffi": "^3.3.6",
+    "playwright-core": "^1.64.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^20.19.43",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^4.1.12"
+  }
+}
