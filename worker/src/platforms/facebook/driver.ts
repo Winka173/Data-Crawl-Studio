@@ -162,8 +162,9 @@ export class PlaywrightFbDriver implements FbDriver {
     // left navigation, which has its own scroll area, and the page would not move).
     const vp = page.viewportSize() ?? (await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })));
     await page.mouse.move(vp.width * (0.42 + Math.random() * 0.16), vp.height * (0.45 + Math.random() * 0.25), { steps: 4 });
-    // A few wheel steps of uneven size, like a person scrolling.
-    const steps = 2 + Math.floor(Math.random() * 3);
+    // A flick of several wheel steps of uneven size, like a person skimming. Group posts are long: fewer steps
+    // passed only ~1.6 posts per action on a real feed.
+    const steps = 5 + Math.floor(Math.random() * 4);
     for (let i = 0; i < steps; i++) {
       await page.mouse.wheel(0, 300 + Math.random() * 400);
       await page.waitForTimeout(150 + Math.random() * 350);

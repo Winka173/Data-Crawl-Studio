@@ -163,6 +163,18 @@ describe('Facebook mapping and validation', () => {
     expect(pseudonymizeFbText(out, [], p)).toBe(out); // stable when applied twice
   });
 
+  it('removes person ids that sit inside system paths (seen in a real post)', () => {
+    const text = 'See https://www.facebook.com/groups/153841081324271/user/100000000000077/?__cft__[0]=AZ and '
+      + 'facebook.com/people/Some-Person/100000000000078 and m.facebook.com/messages/t/100000000000079 and fb.com/stories/100000000000080/';
+    const out = pseudonymizeFbText(text, [], p)!;
+    expect(out).not.toMatch(/10000000000007[7-9]|100000000000080|Some-Person/);
+    expect(out).toContain(`https://www.facebook.com/groups/153841081324271/user/${p.of('facebook', '100000000000077')}/`);
+    expect(out).toContain(`facebook.com/people/${p.of('facebook', '100000000000078')}`);
+    expect(out).toContain(`m.facebook.com/messages/t/${p.of('facebook', '100000000000079')}`);
+    expect(out).toContain('https://www.facebook.com/groups/153841081324271/'); // the group itself is public
+    expect(pseudonymizeFbText(out, [], p)).toBe(out);
+  });
+
   it('rejects a batch with a record missing its creation time', () => {
     const spec = syntheticGroup(NOW)[2]!;
     const c = extractFrom({ data: { node: storyNode(spec, NOW) } }).posts.get(spec.id)!;

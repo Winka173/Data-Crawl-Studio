@@ -171,3 +171,8 @@ The owner asked (2026-11-02) for a run without comments and for more control per
 - **Comment switch:** every source has `collect_comments`. When it is off, the listing stores posts with their counts (reactions, comments, shares) but never enqueues comment jobs. For Facebook, each post is then not opened, which cuts a year of a busy group from about 65,000 actions to about 1,000. Switching it off cancels comment jobs still waiting; comments already stored are kept.
 - **Depth:** any whole number of days from 1 to 3,650, or all history. 7 / 30 / 90 / 365 stay as presets, and "Custom…" takes a number.
 - **Editing:** depth, schedule and the comment switch can be edited on each source ("Settings" in the Sources table). Raising the depth re-lists the source (D25).
+
+## D30. Person ids inside system paths; faster pacing on the owner's request
+- **Person ids in paths:** a real post linked `facebook.com/groups/<group>/user/<user id>/`, a group member's page. The `groups/` path was treated as public and kept, so the user id reached the stored text. Ids after `groups/<g>/user/`, `people/<name>/`, `messages/t/` and `stories/` are now pseudonymised. A `people` link also drops the name. Stored rows were cleaned with this install's salt (posts, raw payloads, edit history), and the export made before the fix was deleted.
+- **Pacing:** on 2026-11-02 the owner asked for much faster collection. Facebook pacing was set to 2–5 s between actions, 600 actions/hour and 6,000/day, through the same validated settings as the Settings page.
+- **Scrolling:** each feed scroll is now a flick of 5–8 wheel steps instead of 2–4. Group posts are long, and short scrolls passed only about 1.6 posts per action; the longer flick measured about 3.6 posts per action.

@@ -36,17 +36,27 @@ export function pseudonymizeFbText(text: string | null, ranges: FbRange[], p: Ps
 
 /** First path segments of facebook.com that are never a person's vanity name. */
 const FB_SYSTEM_PATHS = new Set(
-  'groups watch photo photos photo.php reel reels share sharer sharer.php hashtag events permalink.php story.php pages l.php marketplace gaming help policies business ads login settings notes media video videos stories fundraisers messages search home.php plugins dialog privacy terms legal'.split(' '),
+  'groups watch photo photos photo.php reel reels share sharer sharer.php hashtag events permalink.php story.php pages l.php marketplace gaming help policies business ads login settings notes media video videos stories fundraisers messages search home.php plugins dialog privacy terms legal people'.split(' '),
 );
 const FB_LINK = /\b((?:https?:\/\/)?(?:(?:www|m|web|mbasic)\.)?(?:facebook\.com|fb\.com))\/(?:profile\.php\?id=(\d+)|([A-Za-z0-9.]{5,}))(?=[/?#\s)\]"'<>,]|$)/gi;
+/**
+ * System paths that still carry a person's id (or name and id): a group member's page, a public "people" page,
+ * a chat with someone, someone's story. Seen in real posts: `facebook.com/groups/<group>/user/<user id>/`.
+ */
+const FB_PERSON_IN_PATH =
+  /\b((?:https?:\/\/)?(?:(?:www|m|web|mbasic)\.)?(?:facebook\.com|fb\.com)\/)(groups\/[^/\s?#]+\/user\/|people\/[^/\s?#]+\/|messages\/t\/|stories\/)(\d{5,})/gi;
 
 /**
  * A link written into a post, such as `facebook.com/some.name` or `profile.php?id=…`, is a profile URL when it
  * points to a person, and the app cannot tell a person from a page. Like @mentions (D15), every such link
- * gets a pseudonym; system paths (groups, events, watch, …) are kept.
+ * gets a pseudonym; system paths (groups, events, watch, …) are kept, minus any person id inside them.
  */
 export function pseudonymizeFbLinks(text: string, p: Pseudonymizer): string {
-  return text.replace(FB_LINK, (m, host: string, profileId: string | undefined, vanity: string | undefined) => {
+  const inPath = text.replace(FB_PERSON_IN_PATH, (_m, host: string, kind: string, id: string) =>
+    // A "people" path also holds the person's name: keep only the kind of link.
+    `${host}${kind.toLowerCase().startsWith('people/') ? 'people/' : kind}${p.of('facebook', id)}`,
+  );
+  return inPath.replace(FB_LINK, (m, host: string, profileId: string | undefined, vanity: string | undefined) => {
     if (profileId) return `${host}/${p.of('facebook', profileId)}`;
     const v = vanity!.replace(/\.+$/, '');
     const trail = vanity!.slice(v.length);
