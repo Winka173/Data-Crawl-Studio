@@ -21,7 +21,7 @@ export const JOB_FB_COMMENTS = 'fb.comments';
 /** Replaced in tests. */
 export const timing = { sleep: abortableSleep };
 
-export const LIMITS = { maxScrolls: 400, idleScrolls: 4, olderInARow: 3, maxExpandClicks: 600, idleExpandClicks: 5, maxCommentScrolls: 300, idleCommentScrolls: 2 };
+export const LIMITS = { maxScrolls: 20_000, idleScrolls: 8, olderInARow: 3, maxExpandClicks: 600, idleExpandClicks: 5, maxCommentScrolls: 300, idleCommentScrolls: 2 };
 
 // Wired in main.ts (Playwright) and in tests (fake driver).
 let driverFactory: ((app: AppContext) => FbDriver) | null = null;
