@@ -31,8 +31,31 @@ export function pseudonymizeFbText(text: string | null, ranges: FbRange[], p: Ps
     if (r.offset < 0 || r.offset + r.length > out.length) continue;
     out = `${out.slice(0, r.offset)}@${p.of('facebook', r.entity!.id)}${out.slice(r.offset + r.length)}`;
   }
-  return pseudonymizeMentions(out, { platform: 'facebook' }, p);
+  return pseudonymizeMentions(pseudonymizeFbLinks(out, p), { platform: 'facebook' }, p);
 }
+
+/** First path segments of facebook.com that are never a person's vanity name. */
+const FB_SYSTEM_PATHS = new Set(
+  'groups watch photo photos photo.php reel reels share sharer sharer.php hashtag events permalink.php story.php pages l.php marketplace gaming help policies business ads login settings notes media video videos stories fundraisers messages search home.php plugins dialog privacy terms legal'.split(' '),
+);
+const FB_LINK = /\b((?:https?:\/\/)?(?:(?:www|m|web|mbasic)\.)?(?:facebook\.com|fb\.com))\/(?:profile\.php\?id=(\d+)|([A-Za-z0-9.]{5,}))(?=[/?#\s)\]"'<>,]|$)/gi;
+
+/**
+ * A link written into a post, such as `facebook.com/some.name` or `profile.php?id=…`, is a profile URL when it
+ * points to a person, and the app cannot tell a person from a page. Like @mentions (D15), every such link
+ * gets a pseudonym; system paths (groups, events, watch, …) are kept.
+ */
+export function pseudonymizeFbLinks(text: string, p: Pseudonymizer): string {
+  return text.replace(FB_LINK, (m, host: string, profileId: string | undefined, vanity: string | undefined) => {
+    if (profileId) return `${host}/${p.of('facebook', profileId)}`;
+    const v = vanity!.replace(/\.+$/, '');
+    const trail = vanity!.slice(v.length);
+    if (FB_SYSTEM_PATHS.has(v.toLowerCase()) || PSEUDONYM_RE.test(v)) return m;
+    const pseudo = /^\d+$/.test(v) ? p.of('facebook', v) : p.of('facebook-handle', v.toLowerCase());
+    return `${host}/${pseudo}${trail}`;
+  });
+}
+const PSEUDONYM_RE = /^u_[0-9a-f]{16}$/;
 
 function media(m: FbMedia[]): MediaRecord[] {
   return m.map((x, i) => ({

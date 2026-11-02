@@ -38,6 +38,8 @@ export interface PostSpec {
   photos?: number;
   video?: boolean;
   shared?: boolean;
+  /** Simulate a node in an unexpected shape: no creation time anywhere. */
+  noTime?: boolean;
   comments: CommentSpec[];
 }
 
@@ -54,12 +56,14 @@ function textWithMention(text: string, mention?: number) {
   return { text: full, ranges: [{ offset: 0, length: name.length, entity: { __typename: 'User', id: userId(mention), url: `https://www.facebook.com/${userId(mention)}` } }] };
 }
 
-export function commentNode(c: CommentSpec, postId: string, now: number, depth = 0, withReplies = true): Record<string, unknown> {
+export function commentNode(c: CommentSpec, postId: string, now: number, depth = 0, withReplies = true, parentId?: string): Record<string, unknown> {
   return {
     __typename: 'Comment',
     id: b64(`comment:${postId}_${c.id}`),
     legacy_fbid: c.id,
     depth,
+    // 2026 shape: a reply names its parent (with the parent's author, a person) instead of being nested only.
+    ...(parentId ? { comment_direct_parent: { id: b64(`comment:${postId}_${parentId}`), author: actor(1) } } : {}),
     created_time: Math.floor(now / 1000) - c.ageMin * 60,
     body: textWithMention(c.text, c.mention),
     author: actor(c.author),
@@ -68,7 +72,7 @@ export function commentNode(c: CommentSpec, postId: string, now: number, depth =
       id: b64(`feedback:${postId}_${c.id}`),
       reactors: { count: c.reactions ?? 0 },
       replies_fields: { count: c.replies?.length ?? 0, total_count: c.replies?.length ?? 0 },
-      replies_connection: { edges: withReplies ? (c.replies ?? []).map((r) => ({ node: commentNode(r, postId, now, depth + 1) })) : [], page_info: { has_next_page: !withReplies && !!c.replies?.length } },
+      replies_connection: { edges: withReplies ? (c.replies ?? []).map((r) => ({ node: commentNode(r, postId, now, depth + 1, true, c.id) })) : [], page_info: { has_next_page: !withReplies && !!c.replies?.length } },
     },
   };
 }
@@ -78,7 +82,7 @@ export function storyNode(p: PostSpec, now: number, opts: { withComments?: boole
   const url = `https://www.facebook.com/groups/${GROUP_ID}/posts/${p.id}/`;
   const media = [
     ...Array.from({ length: p.photos ?? 0 }, (_, i) => ({ __typename: 'Photo', id: `55${p.id}${i}`, image: { uri: `https://scontent.example/p${p.id}_${i}.jpg`, width: 960, height: 720 }, accessibility_caption: 'May be an image of text' })),
-    ...(p.video ? [{ __typename: 'Video', id: `66${p.id}`, permalink_url: `https://www.facebook.com/watch/?v=66${p.id}`, length_in_second: 42 }] : []),
+    ...(p.video ? [{ __typename: 'Video', id: `66${p.id}`, permalink_url: `https://www.facebook.com/synthetic.uploader${typeof p.author === 'number' ? p.author : 0}/videos/66${p.id}/?idorvanity=${GROUP_ID}`, length_in_second: 42.317 }] : []),
   ];
   const countTotal = (cs: CommentSpec[]): number => cs.reduce((n, c) => n + 1 + countTotal(c.replies ?? []), 0);
   return {
@@ -102,7 +106,7 @@ export function storyNode(p: PostSpec, now: number, opts: { withComments?: boole
         story: {
           comet_sections: {
             actor_photo: { story: { actors: [actor(p.author)] } },
-            metadata: [{ __typename: 'CometFeedStoryMinimizedTimestampStrategy', story: { creation_time: created, url } }],
+            metadata: [{ __typename: 'CometFeedStoryMinimizedTimestampStrategy', story: { ...(p.noTime ? {} : { creation_time: created }), url } }],
           },
         },
       },
@@ -185,12 +189,17 @@ export interface FakeFbOptions {
   /** Simulate a Facebook layout change: the page renders articles but the JSON has no Story nodes. */
   brokenJson?: boolean;
   allCommentsControl?: boolean;
+  /** A "more replies" control that stays on screen and loads nothing when clicked. */
+  deadExpandButton?: boolean;
+  /** Like the 2026 permalink page: only this many top-level comments at first, the rest load as the page scrolls. */
+  commentsPerScreen?: number;
   pacer?: Pacer;
 }
 
 export class FakeFbDriver implements FbDriver {
   actions = 0;
   opened: string[] = [];
+  diagnosed: string[] = [];
   private screen = 0;
   private queue: unknown[] = [];
   private expandQueue: unknown[] = [];
@@ -216,6 +225,11 @@ export class FakeFbDriver implements FbDriver {
     return this.o.loggedIn ?? true;
   }
 
+  async diagnose(reason: string) {
+    this.diagnosed.push(reason);
+    return null;
+  }
+
   async open(url: string, into: Extracted, signal: AbortSignal): Promise<Snapshot> {
     await this.act(signal, url);
     this.opened.push(url);
@@ -225,8 +239,29 @@ export class FakeFbDriver implements FbDriver {
       const spec = this.o.posts.find((p) => p.id === post);
       if (!spec) return { url, hasFeed: false, articleCount: 0, notAvailable: true };
       // Like Facebook: the first screen shows top-level comments only; replies arrive when expanded.
-      if (!this.o.brokenJson) extractFrom({ data: { node: storyNode(spec, this.o.now, { withComments: true, withReplies: false }) } }, into);
-      this.expandQueue = spec.comments.filter((c) => c.replies?.length).map((c) => ({ data: { node: commentNode(c, spec.id, this.o.now) } }));
+      const k = this.o.commentsPerScreen;
+      this.commentPages = [];
+      if (this.o.brokenJson) {
+        /* nothing readable */
+      } else if (k) {
+        const page = (cs: CommentSpec[]) => ({ data: { node: { __typename: 'Feedback', id: b64(`feedback:${spec.id}`), display_comments: { edges: cs.map((c) => ({ node: commentNode(c, spec.id, this.o.now, 0, false) })) } } } });
+        extractFrom({ data: { node: storyNode(spec, this.o.now) } }, into);
+        extractFrom(page(spec.comments.slice(0, k)), into);
+        for (let i = k; i < spec.comments.length; i += k) this.commentPages.push(page(spec.comments.slice(i, i + k)));
+      } else extractFrom({ data: { node: storyNode(spec, this.o.now, { withComments: true, withReplies: false }) } }, into);
+      // "View N replies" loads the replies as a page of the parent's Feedback (2026 shape), which points back to its owner.
+      this.expandQueue = spec.comments
+        .filter((c) => c.replies?.length)
+        .map((c) => ({
+          data: {
+            node: {
+              __typename: 'Feedback',
+              id: b64(`feedback:${spec.id}_${c.id}`),
+              parent_object_ent: { __typename: 'Comment', id: b64(`comment:${spec.id}_${c.id}`), legacy_fbid: c.id, created_time: 1 },
+              replies_connection: { edges: (c.replies ?? []).map((r) => ({ node: commentNode(r, spec.id, this.o.now, 1, true, c.id) })) },
+            },
+          },
+        }));
       return { url, hasFeed: false, articleCount: 1, notAvailable: false };
     }
     this.screen = 0;
@@ -239,8 +274,15 @@ export class FakeFbDriver implements FbDriver {
 
   private pending: unknown[] = [];
 
+  private commentPages: unknown[] = [];
+
   async scroll(signal: AbortSignal) {
     await this.act(signal, 'https://www.facebook.com/groups/x/');
+    if (this.opened.at(-1)?.includes('/posts/')) {
+      const next = this.commentPages.shift();
+      if (next) this.pending.push(next);
+      return;
+    }
     const per = this.o.perScreen ?? 4;
     this.pending.push(...this.queue.splice(0, per));
     this.screen++;
@@ -253,6 +295,10 @@ export class FakeFbDriver implements FbDriver {
   }
 
   async expandOne(signal: AbortSignal) {
+    if (this.o.deadExpandButton) {
+      await this.act(signal, 'https://www.facebook.com/groups/x/posts/y/');
+      return true;
+    }
     if (!this.expandQueue.length) return false;
     await this.act(signal, 'https://www.facebook.com/groups/x/posts/y/');
     this.pending.push(this.expandQueue.shift());

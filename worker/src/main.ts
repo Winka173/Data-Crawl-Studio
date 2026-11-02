@@ -1,3 +1,4 @@
+import path from 'node:path';
 import { createContext } from './context';
 import { openDatabase } from './db/db';
 import { acquireLock } from './lock';
@@ -34,7 +35,7 @@ async function main(): Promise<void> {
   const browser = new BrowserManager(ctx);
   const pacer = new Pacer(ctx);
   pacer.prune();
-  const fbDriver = new PlaywrightFbDriver(browser, pacer);
+  const fbDriver = new PlaywrightFbDriver(browser, pacer, path.join(ctx.paths.logsDir, 'fb-shapes'));
   setFbDriver(() => fbDriver, () => browser.writeStatus('facebook', { lastCrawlOkAt: new Date().toISOString(), loginWall: false }));
 
   const server = await startControlServer(buildControlRouter(ctx, [(r) => installCrawlRoutes(r, ctx, runner), (r) => installBrowserRoutes(r, ctx, browser)]), {

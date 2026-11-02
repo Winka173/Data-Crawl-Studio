@@ -2,6 +2,7 @@ import type { JobView, Platform, PostDetail, PostListItem, SourceView, StatusVie
 import { PLATFORMS } from '../../../shared/contracts';
 import { HttpError } from '../accounts';
 import type { AppContext } from '../context';
+import { listExports, parseExportRequest, runExport } from '../export/export';
 import { platformState } from '../queue/queue';
 import type { QueueRunner } from '../queue/runner';
 import { addSources, cancelSource, deleteSource, getSource, pausePlatform, pauseSource, resumePlatformOrGlobal, resumeSource, startCrawl, updateSource } from '../sources/service';
@@ -40,6 +41,9 @@ export function installCrawlRoutes(r: Router, app: AppContext, runner: QueueRunn
   const db = app.db;
 
   // ---- sources
+  r.get('/exports', () => listExports(app));
+  r.post('/exports', (req) => runExport(app, parseExportRequest(req.body)));
+
   r.get('/sources', () => (db.prepare(`${SOURCE_VIEW_SQL} ORDER BY s.created_at DESC, s.id DESC`).all() as RawSourceView[]).map(toSourceView));
   r.post('/sources', (req) => {
     const b = (req.body ?? {}) as { links?: unknown; depthDays?: unknown; scheduleMinutes?: unknown };

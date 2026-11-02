@@ -6,6 +6,7 @@ import type { MessageKey } from './i18n/en';
 import { DashboardPage } from './pages/DashboardPage';
 import { DataPage } from './pages/DataPage';
 import { LogsPage } from './pages/LogsPage';
+import { ExportsPage } from './pages/ExportsPage';
 import { Placeholder } from './pages/Placeholder';
 import { QueuePage } from './pages/QueuePage';
 import { SettingsPage } from './pages/SettingsPage';
@@ -100,7 +101,7 @@ function Shell({ settings, onSettings }: { settings: AppSettings; onSettings(s: 
         {page === 'search' && <Placeholder title="nav.search" slice={6} />}
         {page === 'queue' && <QueuePage />}
         {page === 'data' && <DataPage />}
-        {page === 'exports' && <Placeholder title="nav.exports" slice={8} />}
+        {page === 'exports' && <ExportsPage />}
         {page === 'localApi' && <Placeholder title="nav.localApi" slice={8} />}
         {page === 'settings' && <SettingsPage settings={settings} onSettings={onSettings} />}
         {page === 'logs' && <LogsPage />}

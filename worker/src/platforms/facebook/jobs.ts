@@ -1,6 +1,7 @@
 import type { AppContext } from '../../context';
 import { log } from '../../log';
-import { BlockedError, NotFoundError, ParserError, PermanentError } from '../../queue/errors';
+import { abortableSleep } from '../../browser/pacing';
+import { BlockedError, NotFoundError, PacingWaitError, ParserError, PermanentError } from '../../queue/errors';
 import { registerJob, type JobContext } from '../../queue/runner';
 import { computeCutoff, needsCommentSync } from '../../sources/incremental';
 import { parseLink } from '../../sources/links';
@@ -17,7 +18,10 @@ export const JOB_FB_GROUP = 'fb.group';
 export const JOB_FB_COMMENTS = 'fb.comments';
 
 /** Upper bounds per job; the pacing caps usually stop a job long before these. */
-export const LIMITS = { maxScrolls: 400, idleScrolls: 4, olderInARow: 3, maxExpandClicks: 600 };
+/** Replaced in tests. */
+export const timing = { sleep: abortableSleep };
+
+export const LIMITS = { maxScrolls: 400, idleScrolls: 4, olderInARow: 3, maxExpandClicks: 600, idleExpandClicks: 5, maxCommentScrolls: 300, idleCommentScrolls: 2 };
 
 // Wired in main.ts (Playwright) and in tests (fake driver).
 let driverFactory: ((app: AppContext) => FbDriver) | null = null;
@@ -44,6 +48,19 @@ function getSource(jc: JobContext): SourceRow {
   return s;
 }
 
+/** On a parser mismatch, save a value-free summary of what the page delivered, so the parser can be fixed. */
+async function withDiagnostics(d: FbDriver, job: string, body: () => Promise<void>): Promise<void> {
+  try {
+    await body();
+  } catch (e) {
+    if (e instanceof ParserError) {
+      const file = await d.diagnose?.(e.code, { job });
+      if (file) log.warn('facebook parser diagnostics saved', { file });
+    }
+    throw e;
+  }
+}
+
 async function requireLogin(d: FbDriver): Promise<void> {
   if (!(await d.loggedIn())) throw new BlockedError('Facebook login required: open the login window in Accounts & Keys', 'login_required');
 }
@@ -51,9 +68,13 @@ async function requireLogin(d: FbDriver): Promise<void> {
 // ---- fb.group: open the group's chronological feed, scroll until the cutoff, store posts -----------------
 
 registerJob(JOB_FB_GROUP, async (jc) => {
+  const d = driver(jc.app);
+  await withDiagnostics(d, JOB_FB_GROUP, () => collectGroup(jc, d));
+});
+
+async function collectGroup(jc: JobContext, d: FbDriver): Promise<void> {
   const db = jc.app.db;
   const source = getSource(jc);
-  const d = driver(jc.app);
   const cur = jc.cursor<GroupCursor>() ?? { cutoff: computeCutoff(source, jc.app.settings().youtube.recheckDays), passStartedAt: nowIso() };
   jc.saveCursor(cur);
   await requireLogin(d);
@@ -97,7 +118,7 @@ registerJob(JOB_FB_GROUP, async (jc) => {
     for (const c of fresh) olderInARow = cutoffMs !== null && c.createdTime !== null && c.createdTime * 1000 < cutoffMs ? olderInARow + 1 : 0;
     idle = fresh.length ? 0 : idle + 1;
     if (olderInARow >= LIMITS.olderInARow || idle >= LIMITS.idleScrolls || i === LIMITS.maxScrolls) break;
-    await d.scroll(jc.signal);
+    await scrollKeepingPlace(jc, d);
     await d.drain(ex);
   }
 
@@ -106,7 +127,25 @@ registerJob(JOB_FB_GROUP, async (jc) => {
   }
   jc.saveCursor(null);
   onSuccess?.();
-});
+}
+
+/**
+ * A feed cannot be reopened at a date: a listing re-queued by the hourly/daily cap would start again from the top
+ * and, for a deep window, never reach the end. So the listing keeps its tab and place and waits for the cap.
+ */
+async function scrollKeepingPlace(jc: JobContext, d: FbDriver): Promise<void> {
+  for (;;) {
+    try {
+      await d.scroll(jc.signal);
+      return;
+    } catch (e) {
+      if (!(e instanceof PacingWaitError)) throw e;
+      const ms = Math.max(1000, Date.parse(e.resumeAt) - Date.now());
+      log.info('facebook listing waits for the pacing cap, keeping its place', { job: jc.job.id, until: e.resumeAt });
+      await timing.sleep(ms, jc.signal);
+    }
+  }
+}
 
 function storePosts(jc: JobContext, source: SourceRow, container: FbContainer, cands: FbPostCandidate[], p: ReturnType<AppContext['pseudonymizer']>, recheckFrom: string): void {
   if (!cands.length) return;
@@ -131,6 +170,11 @@ function storePosts(jc: JobContext, source: SourceRow, container: FbContainer, c
 // ---- fb.comments: open one post, show all comments, expand every "more comments/replies" -------------
 
 registerJob(JOB_FB_COMMENTS, async (jc) => {
+  const d = driver(jc.app);
+  await withDiagnostics(d, JOB_FB_COMMENTS, () => collectComments(jc, d));
+});
+
+async function collectComments(jc: JobContext, d: FbDriver): Promise<void> {
   const db = jc.app.db;
   const postId = jc.job.target!;
   const container: FbContainer = { id: String(jc.params.groupId), name: (jc.params.groupName as string | null) ?? null };
@@ -138,7 +182,6 @@ registerJob(JOB_FB_COMMENTS, async (jc) => {
     | { id: number; comment_count: number | null }
     | undefined;
   if (!post) throw new PermanentError(`post ${postId} not stored`, 'post_missing');
-  const d = driver(jc.app);
   await requireLogin(d);
   const passStartedAt = nowIso();
   const ex = emptyExtracted();
@@ -155,11 +198,32 @@ registerJob(JOB_FB_COMMENTS, async (jc) => {
 
   let complete = await d.showAllComments(jc.signal);
   await d.drain(ex);
+  // Click every "more comments / replies" control. When none is left but the post reports more comments than were
+  // captured, scroll: the permalink page also loads comments as it scrolls. Posts that are already complete cost nothing.
+  const captured = () => [...ex.comments.values()].filter((c) => c.postId === postId || c.postId === null).length;
+  const reported = () => ex.posts.get(postId)?.commentCount ?? post.comment_count ?? 0;
   let clicks = 0;
-  while (await d.expandOne(jc.signal)) {
+  let idleClicks = 0;
+  let scrolls = 0;
+  let idleScrolls = 0;
+  for (;;) {
+    const before = ex.comments.size;
+    let clicked = false;
+    if (await d.expandOne(jc.signal)) {
+      clicked = true;
+      clicks++;
+    } else if (captured() < reported() && idleScrolls < LIMITS.idleCommentScrolls && scrolls < LIMITS.maxCommentScrolls) {
+      await d.scroll(jc.signal);
+      scrolls++;
+    } else break;
     await d.drain(ex);
     jc.throwIfAborted();
-    if (++clicks >= LIMITS.maxExpandClicks) {
+    const grew = ex.comments.size > before;
+    // A control that loads nothing (click swallowed, or a button that is not what it seems) must not be clicked forever.
+    if (clicked) idleClicks = grew ? 0 : idleClicks + 1;
+    else idleScrolls = grew ? 0 : idleScrolls + 1;
+    if (grew) idleScrolls = 0;
+    if (clicks >= LIMITS.maxExpandClicks || idleClicks >= LIMITS.idleExpandClicks || scrolls >= LIMITS.maxCommentScrolls) {
       complete = false;
       break;
     }
@@ -196,9 +260,39 @@ registerJob(JOB_FB_COMMENTS, async (jc) => {
     }
     db.prepare('UPDATE posts SET comments_synced_at = ? WHERE id = ?').run(nowIso(), post.id);
   })();
-  if (!complete) log.info('facebook comments stored without a complete pass', { postId, clicks, orphans });
+  if (!complete) log.info('facebook comments stored without a complete pass', { postId, clicks, scrolls, orphans });
+  // Comments that report replies of which none was captured: the reply controls were not found or not read.
+  const parents = new Set(ordered.map((c) => c.parentCommentId).filter(Boolean));
+  const missingReplies = ordered.filter((c) => (c.replyCount ?? 0) > 0 && !parents.has(c.commentId)).length;
+  if (missingReplies) {
+    const file = await d.diagnose?.('missing_replies', { job: JOB_FB_COMMENTS, expected, stored: records.length, missingReplies, clicks, complete });
+    log.warn('facebook comments: replies reported but not captured', { postId, missingReplies, clicks, file });
+  }
+  // Far fewer comments than the post reports usually means part of the thread was in a shape we do not read.
+  if (expected >= 4 && records.length < expected / 2) {
+    const all = [...ex.comments.values()];
+    const ids = new Set(all.map((c) => c.commentId));
+    const file = await d.diagnose?.('few_comments', {
+      job: JOB_FB_COMMENTS,
+      expected,
+      stored: records.length,
+      orphans,
+      complete,
+      candidates: {
+        total: all.length,
+        forThisPost: cands.length,
+        otherPost: all.filter((c) => c.postId !== null && c.postId !== postId).length,
+        withParent: all.filter((c) => c.parentCommentId).length,
+        parentCaptured: all.filter((c) => c.parentCommentId && ids.has(c.parentCommentId)).length,
+        parentIsPost: all.filter((c) => c.parentCommentId === postId).length,
+        withTime: all.filter((c) => c.createdTime !== null).length,
+        withAuthor: all.filter((c) => c.author !== null).length,
+      },
+    });
+    log.warn('facebook comments: far fewer than the post reports', { postId, expected, stored: records.length, file });
+  }
   onSuccess?.();
-});
+}
 
 /** Parents before children; comments whose parent was not captured are left out (never stored detached). */
 export function orderByParent(cands: FbCommentCandidate[]): { ordered: FbCommentCandidate[]; orphans: number } {

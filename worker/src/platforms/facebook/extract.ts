@@ -4,7 +4,7 @@
 // Strategy: read the JSON the page itself loads (GraphQL responses + JSON embedded in <script> tags)
 // and walk it for Story and Comment nodes wherever they sit, instead of scraping obfuscated DOM classes.
 
-export const FB_PARSER_VERSION = 'fb-net-1';
+export const FB_PARSER_VERSION = 'fb-net-5';
 
 /** DOM selectors/texts used only to drive the page (scroll, open, expand), never to read data. */
 export const SELECTORS = {
@@ -139,6 +139,11 @@ type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v);
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : typeof v === 'number' ? String(v) : null);
 const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : null);
+/** Durations and sizes arrive as fractions (e.g. length_in_second: 34.567); the schema stores whole numbers. */
+const whole = (v: unknown): number | null => {
+  const n = num(v);
+  return n === null ? null : Math.round(n);
+};
 
 /** Breadth-first search inside a subtree, not descending into keys in `skip` (e.g. shared/attached stories, comments). */
 function bfs(root: unknown, pred: (key: string, value: unknown, parent: Obj) => boolean, skip: Set<string>, maxNodes = 20_000): unknown {
@@ -160,7 +165,7 @@ function bfs(root: unknown, pred: (key: string, value: unknown, parent: Obj) => 
 }
 
 const STORY_SKIP = new Set(['attached_story', 'attached_story_with_attachments', 'comet_sections_for_attached_story', 'all_subattachments_for_shared', 'comments', 'comment_rendering_instance', 'comment_list_renderer', 'display_comments', 'interesting_top_level_comments', 'top_level_comments', 'replies_connection', 'comment_rendering_instance_for_feed_location']);
-const COMMENT_SKIP = new Set(['replies_connection', 'replies', 'comment_parent', 'parent_feedback', 'top_level_comments']);
+const COMMENT_SKIP = new Set(['replies_connection', 'replies', 'comment_parent', 'comment_direct_parent', 'parent_feedback', 'parent_object_ent', 'top_level_comments']);
 
 export function decodeCommentId(id: string): { postId: string | null; commentId: string | null } {
   // Comment node ids look like base64("comment:<postId>_<commentId>").
@@ -192,6 +197,33 @@ function rangesOf(textObj: unknown): FbRange[] {
   });
 }
 
+/**
+ * Media URLs must not name a person. A video permalink is `facebook.com/<uploader vanity>/videos/<id>`, so it is
+ * rewritten to the neutral `watch/?v=<id>`. CDN files (fbcdn.net) carry no names. Any other facebook.com URL is
+ * kept only for paths that cannot hold a profile name; otherwise the media item is dropped.
+ */
+export function safeMediaUrl(url: string, videoId: string | null): string | null {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  const host = u.hostname.toLowerCase();
+  if (host.endsWith('.fbcdn.net') || host === 'fbcdn.net') return url;
+  if (host !== 'facebook.com' && !host.endsWith('.facebook.com')) return url; // e.g. an external link preview image
+  const video = /\/videos\/(?:[^/]+\/)?(\d+)/.exec(u.pathname)?.[1] ?? (u.pathname.startsWith('/watch') ? u.searchParams.get('v') : null) ?? videoId;
+  if (video && /^\d+$/.test(video) && (/\/videos\//.test(u.pathname) || u.pathname.startsWith('/watch') || u.pathname.startsWith('/reel'))) {
+    return `https://www.facebook.com/watch/?v=${video}`;
+  }
+  const reel = /^\/reel\/(\d+)/.exec(u.pathname)?.[1];
+  if (reel) return `https://www.facebook.com/reel/${reel}`;
+  const fbid = u.searchParams.get('fbid');
+  if (/^\/photo(\.php)?\/?$/.test(u.pathname) && fbid && /^\d+$/.test(fbid)) return `https://www.facebook.com/photo/?fbid=${fbid}`;
+  return null;
+}
+
 function mediaIn(root: unknown, skip: Set<string>): FbMedia[] {
   const out: FbMedia[] = [];
   const seen = new Set<string>();
@@ -207,15 +239,16 @@ function mediaIn(root: unknown, skip: Set<string>): FbMedia[] {
     const t = v.__typename;
     if (t === 'Photo' || t === 'Video' || t === 'GenericAttachmentMedia') {
       const img = (isObj(v.image) ? v.image : isObj(v.photo_image) ? v.photo_image : isObj(v.viewer_image) ? v.viewer_image : null) as Obj | null;
-      const url = t === 'Video' ? str(v.permalink_url) ?? str(v.playable_url) ?? str(img?.uri) : str(img?.uri);
+      const raw = t === 'Video' ? str(v.permalink_url) ?? str(v.playable_url) ?? str(img?.uri) : str(img?.uri);
+      const url = raw ? safeMediaUrl(raw, t === 'Video' ? str(v.id) : null) : null;
       if (url && !seen.has(url)) {
         seen.add(url);
         out.push({
           type: t === 'Video' ? 'video' : 'image',
           url,
-          width: num(img?.width) ?? num(v.width),
-          height: num(img?.height) ?? num(v.height),
-          durationSeconds: num(v.length_in_second) ?? (num(v.playable_duration_in_ms) !== null ? Math.round(num(v.playable_duration_in_ms)! / 1000) : null),
+          width: whole(img?.width) ?? whole(v.width),
+          height: whole(img?.height) ?? whole(v.height),
+          durationSeconds: whole(v.length_in_second) ?? (num(v.playable_duration_in_ms) !== null ? Math.round(num(v.playable_duration_in_ms)! / 1000) : null),
           altText: str(v.accessibility_caption),
         });
       }
@@ -283,8 +316,11 @@ function commentCandidate(c: Obj, parent: string | null, postHint: string | null
   const commentId = str(c.legacy_fbid) ?? decoded.commentId;
   if (!commentId) return null;
   const body = isObj(c.body) ? c.body : isObj(c.preferred_body) ? c.preferred_body : null;
-  const parentObj = isObj(c.comment_parent) ? c.comment_parent : null;
-  const parentId = parentObj ? (str(parentObj.legacy_fbid) ?? decodeCommentId(str(parentObj.id) ?? '').commentId) : parent;
+  // Replies name their parent in comment_direct_parent (2026 shape) or comment_parent (older shape).
+  const parentObj = isObj(c.comment_direct_parent) ? c.comment_direct_parent : isObj(c.comment_parent) ? c.comment_parent : null;
+  const explicitParent = parentObj ? (str(parentObj.legacy_fbid) ?? decodeCommentId(str(parentObj.id) ?? '').commentId) : null;
+  // Facebook repeats a Comment node inside itself (e.g. under its own feedback); that copy is not its own reply.
+  const parentId = [explicitParent, parent].find((x) => x && x !== commentId) ?? null;
   const feedback = isObj(c.feedback) ? c.feedback : {};
   return {
     commentId,
@@ -306,6 +342,9 @@ function commentCandidate(c: Obj, parent: string | null, postHint: string | null
  * Walk any JSON document and collect every Story and Comment node into `into`.
  * Later sightings of the same id fill in fields that were missing earlier (feeds often carry partial nodes).
  */
+/** Keys that point back up the tree (a reply's parent, a Feedback's owner); following them would re-nest nodes. */
+const BACK_POINTERS = new Set(['comment_parent', 'comment_direct_parent', 'parent_feedback', 'parent_object_ent']);
+
 export function extractFrom(doc: unknown, into: Extracted = emptyExtracted()): Extracted {
   const stack: { v: unknown; parentComment: string | null; post: string | null; depth: number }[] = [{ v: doc, parentComment: null, post: null, depth: 0 }];
   let guard = 0;
@@ -338,8 +377,8 @@ export function extractFrom(doc: unknown, into: Extracted = emptyExtracted()): E
     }
     for (const [k, child] of Object.entries(v)) {
       if (!child || typeof child !== 'object') continue;
-      // A Comment's own parent pointer is not a child of it; a shared (attached) story is never a post of this group.
-      if (k === 'comment_parent' || k === 'parent_feedback' || k.startsWith('attached_story')) continue;
+      // Pointers back to a parent or owner are not children; a shared (attached) story is never a post of this group.
+      if (BACK_POINTERS.has(k) || k.startsWith('attached_story')) continue;
       // Replies belong to the comment we are inside; a story's comments start a new top level.
       const p = v.__typename === 'Story' ? null : nextParent;
       stack.push({ v: child, parentComment: p, post: nextPost, depth: depth + 1 });

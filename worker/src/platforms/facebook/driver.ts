@@ -1,6 +1,7 @@
 import type { Page, Response } from 'playwright-core';
 import type { Pacer } from '../../browser/pacing';
 import type { BrowserManager } from '../../browser/session';
+import { ShapeBook } from '../../browser/shapes';
 import { log } from '../../log';
 import { BlockedError } from '../../queue/errors';
 import { detectBlockInPage, detectBlockInResponse } from './detect';
@@ -28,6 +29,8 @@ export interface FbDriver {
   /** Throws BlockedError if the current page is a checkpoint/CAPTCHA/login wall/block notice. */
   assertNotBlocked(): Promise<void>;
   loggedIn(): Promise<boolean>;
+  /** Write a value-free summary of the JSON seen since the last open() (for parser fixes). Returns the file path. */
+  diagnose?(reason: string, extra?: Record<string, unknown>): Promise<string | null>;
 }
 
 export class PlaywrightFbDriver implements FbDriver {
@@ -35,8 +38,21 @@ export class PlaywrightFbDriver implements FbDriver {
   private bodies: { status: number; text: string }[] = [];
   private page: Page | null = null;
   private listener = (r: Response) => this.onResponse(r);
+  private shapes = new ShapeBook();
+  private lastMenu: string[] = [];
 
-  constructor(private readonly browser: BrowserManager, private readonly pacer: Pacer) {}
+  constructor(private readonly browser: BrowserManager, private readonly pacer: Pacer, private readonly diagDir?: string) {}
+
+  async diagnose(reason: string, extra: Record<string, unknown> = {}): Promise<string | null> {
+    if (!this.diagDir || !this.shapes.size) return null;
+    try {
+      const controls = await this.controlTexts().catch(() => []);
+      return this.shapes.write(this.diagDir, reason, { ...extra, controls, sortMenu: this.lastMenu.map((t) => t.replace(/(\p{Lu}[\p{Ll}\p{M}]+)(\s+\p{Lu}[\p{Ll}\p{M}]+)+/gu, '<name>')) });
+    } catch (e) {
+      log.warn('could not write parser diagnostics', { e: e instanceof Error ? e.message : String(e) });
+      return null;
+    }
+  }
 
   private async tab(): Promise<Page> {
     if (this.page && !this.page.isClosed()) return this.page;
@@ -61,6 +77,30 @@ export class PlaywrightFbDriver implements FbDriver {
     );
   }
 
+  /**
+   * Texts of the page's comment controls, for fixing SELECTORS. Only short texts made of comment-UI words are kept,
+   * and runs of two or more capitalised words (usually a person's name) are masked.
+   */
+  private async controlTexts(): Promise<{ role: string; text: string }[]> {
+    const page = await this.tab();
+    const raw = await page.$$eval('[role="button"], [role="menuitem"], [role="menuitemradio"], [role="radio"]', (els) =>
+      els.slice(0, 3000).map((e) => ({ role: e.getAttribute('role') ?? '', text: ((e as HTMLElement).innerText ?? '').trim().slice(0, 80) })),
+    );
+    const vocab = /comment|repl|relevant|newest|all |more|previous|view|see|bình luận|phản hồi|trả lời|phù hợp|mới nhất|tất cả|xem|thêm|trước/i;
+    const seen = new Set<string>();
+    const out: { role: string; text: string }[] = [];
+    for (const r of raw) {
+      if (!r.text || r.text.length > 60 || !vocab.test(r.text)) continue;
+      const text = r.text.replace(/\s+/g, ' ').replace(/(\p{Lu}[\p{Ll}\p{M}]+)(\s+\p{Lu}[\p{Ll}\p{M}]+)+/gu, '<name>');
+      const key = `${r.role}|${text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ role: r.role, text });
+      if (out.length >= 80) break;
+    }
+    return out;
+  }
+
   async loggedIn(): Promise<boolean> {
     const page = await this.tab();
     return this.browser.hasLoginCookie(page.context(), 'facebook');
@@ -69,11 +109,18 @@ export class PlaywrightFbDriver implements FbDriver {
   async open(url: string, into: Extracted, signal: AbortSignal): Promise<Snapshot> {
     const page = await this.tab();
     await this.pacer.beforeAction('facebook', signal);
+    this.shapes.clear();
+    this.lastMenu = [];
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     await page.waitForSelector(`${SELECTORS.feed}, ${SELECTORS.article}`, { timeout: 15_000 }).catch(() => undefined);
     await this.assertNotBlocked();
     const scripts = await page.$$eval(SELECTORS.embeddedJson, (els) => els.map((e) => e.textContent ?? ''));
-    for (const s of scripts) for (const doc of parseJsonDocuments(s)) extractFrom(doc, into);
+    for (const s of scripts) {
+      for (const doc of parseJsonDocuments(s)) {
+        this.shapes.add(doc);
+        extractFrom(doc, into);
+      }
+    }
     return this.snapshot();
   }
 
@@ -111,6 +158,10 @@ export class PlaywrightFbDriver implements FbDriver {
   async scroll(signal: AbortSignal): Promise<void> {
     const page = await this.tab();
     await this.pacer.beforeAction('facebook', signal);
+    // The wheel scrolls whatever is under the pointer: put it over the main column first (at (0,0) it sits on the
+    // left navigation, which has its own scroll area, and the page would not move).
+    const vp = page.viewportSize() ?? (await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight })));
+    await page.mouse.move(vp.width * (0.42 + Math.random() * 0.16), vp.height * (0.45 + Math.random() * 0.25), { steps: 4 });
     // A few wheel steps of uneven size, like a person scrolling.
     const steps = 2 + Math.floor(Math.random() * 3);
     for (let i = 0; i < steps; i++) {
@@ -122,13 +173,22 @@ export class PlaywrightFbDriver implements FbDriver {
 
   async showAllComments(signal: AbortSignal): Promise<boolean> {
     const page = await this.tab();
-    const order = page.locator('[role="button"]').filter({ hasText: SELECTORS.commentOrderButtonText }).first();
+    // Facebook keeps hidden copies of controls in the DOM: only visible ones count.
+    const order = page.locator('[role="button"]:visible').filter({ hasText: SELECTORS.commentOrderButtonText }).first();
     if (!(await order.isVisible().catch(() => false))) return false;
     if (SELECTORS.allCommentsMenuText.test((await order.innerText().catch(() => '')).trim())) return true;
     await this.pacer.beforeAction('facebook', signal);
     await order.click();
-    const item = page.locator('[role="menuitem"], [role="menuitemradio"]').filter({ hasText: SELECTORS.allCommentsMenuText }).first();
-    if (!(await item.isVisible({ timeout: 5000 }).catch(() => false))) return false;
+    const item = page.locator('[role="menuitem"]:visible, [role="menuitemradio"]:visible, [role="option"]:visible').filter({ hasText: SELECTORS.allCommentsMenuText }).first();
+    if (!(await item.isVisible({ timeout: 5000 }).catch(() => false))) {
+      // Remember what the menu offered (UI words only) for the diagnostics, then close it.
+      this.lastMenu = await page
+        .locator('[role="menuitem"]:visible, [role="menuitemradio"]:visible, [role="option"]:visible, [role="radio"]:visible, [role="menu"]:visible, [role="dialog"]:visible [role="button"]')
+        .evaluateAll((els) => els.slice(0, 20).map((e) => `${e.getAttribute('role')}: ${((e as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 80)}`))
+        .catch(() => []);
+      await page.keyboard.press('Escape').catch(() => undefined);
+      return false;
+    }
     await this.pacer.beforeAction('facebook', signal);
     await item.click();
     await page.waitForTimeout(1500);
@@ -138,7 +198,7 @@ export class PlaywrightFbDriver implements FbDriver {
 
   async expandOne(signal: AbortSignal): Promise<boolean> {
     const page = await this.tab();
-    const btn = page.locator('[role="button"], span[dir="auto"]').filter({ hasText: SELECTORS.expandButtonText }).first();
+    const btn = page.locator('[role="button"]:visible').filter({ hasText: SELECTORS.expandButtonText }).first();
     if (!(await btn.isVisible().catch(() => false))) return false;
     await this.pacer.beforeAction('facebook', signal);
     await btn.scrollIntoViewIfNeeded().catch(() => undefined);
@@ -159,6 +219,7 @@ export class PlaywrightFbDriver implements FbDriver {
       for (const doc of docs) {
         const hit = detectBlockInResponse(b.status, doc);
         if (hit) throw new BlockedError(`Facebook: ${hit.code} (${hit.evidence})`, hit.code);
+        this.shapes.add(doc);
         extractFrom(doc, into);
       }
       if (!docs.length && b.status === 429) throw new BlockedError('Facebook: rate_limited (HTTP 429)', 'rate_limited');

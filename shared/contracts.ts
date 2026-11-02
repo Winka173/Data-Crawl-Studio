@@ -7,8 +7,8 @@ export const PLATFORMS: Platform[] = ['youtube', 'facebook', 'instagram'];
 export type Language = 'vi' | 'en';
 
 /** null = all history */
-export type DepthDays = 7 | 30 | 90 | null;
-export const DEPTH_OPTIONS: DepthDays[] = [7, 30, 90, null];
+export type DepthDays = 7 | 30 | 90 | 365 | null;
+export const DEPTH_OPTIONS: DepthDays[] = [7, 30, 90, 365, null];
 
 export interface PacingSettings {
   minDelayMs: number;
@@ -199,4 +199,16 @@ export interface PostDetail {
   snapshots: { observed_at: string; like_count: number | null; comment_count: number | null; view_count: number | null }[];
   comments: CommentView[];
   commentsTotal: number;
+}
+
+// ---- Exports (slice 8) ------------------------------------------------------------------------
+
+export type ExportFormat = 'jsonl' | 'csv';
+
+export interface ExportView {
+  name: string;
+  dir: string;
+  format: ExportFormat;
+  files: { file: string; rows: number }[];
+  createdAt: string;
 }

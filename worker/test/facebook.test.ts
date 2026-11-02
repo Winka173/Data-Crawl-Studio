@@ -3,15 +3,16 @@ import { setSecret } from '../src/accounts';
 import { Pacer } from '../src/browser/pacing';
 import type { AppContext } from '../src/context';
 import { detectBlockInPage, detectBlockInResponse } from '../src/platforms/facebook/detect';
-import { decodeCommentId, extractFrom, parseJsonDocuments } from '../src/platforms/facebook/extract';
-import { orderByParent, setFbDriver } from '../src/platforms/facebook/jobs';
+import { decodeCommentId, extractFrom, parseJsonDocuments, safeMediaUrl } from '../src/platforms/facebook/extract';
+import { orderByParent, setFbDriver, timing } from '../src/platforms/facebook/jobs';
 import { mapFbPost, pseudonymizeFbText, validateBatch } from '../src/platforms/facebook/map';
 import '../src/platforms/youtube/jobs';
+import { ShapeBook } from '../src/browser/shapes';
 import { Pseudonymizer } from '../src/privacy/pseudonym';
 import { ParserError, PacingWaitError } from '../src/queue/errors';
 import { platformState, resumePlatform } from '../src/queue/queue';
 import { QueueRunner } from '../src/queue/runner';
-import { addSources, startCrawl } from '../src/sources/service';
+import { addSources, startCrawl, updateSource } from '../src/sources/service';
 import { updateSettings } from '../src/settings';
 import { FakeYoutube } from './fixtures/youtube/fakeApi';
 import { commentNode, FakeFbDriver, GROUP_ID, GROUP_NAME, GROUP_SLUG, PAGE_ID, storyNode, syntheticGroup, userId, userName, type FakeFbOptions } from './fixtures/facebook/builders';
@@ -70,12 +71,61 @@ describe('Facebook extraction (synthetic GraphQL shapes)', () => {
     expect(ordered.findIndex((c) => c.commentId === '2000000000000001')).toBeLessThan(ordered.findIndex((c) => c.commentId === '2000000000000003'));
   });
 
+  it('a Comment repeated inside itself is not its own reply (seen on real pages)', () => {
+    const top = commentNode({ id: '2000000000000101', author: 1, text: 'top', ageMin: 9, replies: [{ id: '2000000000000102', author: 2, text: 'reply', ageMin: 5 }] }, '1000000000000001', NOW);
+    const selfCopy = { ...top, feedback: { ...(top.feedback as object), comment_rendering_instance: { comment: { ...top, feedback: {} } } } };
+    const ex = extractFrom({ data: { node: { __typename: 'Story', post_id: '1000000000000001', comments: { edges: [{ node: selfCopy }] } } } });
+    expect(ex.comments.get('2000000000000101')?.parentCommentId).toBeNull();
+    expect(ex.comments.get('2000000000000102')?.parentCommentId).toBe('2000000000000101');
+    const { ordered, orphans } = orderByParent([...ex.comments.values()]);
+    expect(orphans).toBe(0);
+    expect(ordered.map((c) => c.commentId)).toEqual(['2000000000000101', '2000000000000102']);
+  });
+
   it('a later, fuller sighting refreshes counts', () => {
     const post = syntheticGroup(NOW)[1]!;
     const ex = extractFrom({ data: { node: commentNode({ ...post.comments[0]!, reactions: 1 }, post.id, NOW, 0, false) } });
     extractFrom({ data: { node: commentNode({ ...post.comments[0]!, reactions: 7 }, post.id, NOW) } }, ex);
     expect(ex.comments.get('2000000000000001')!.reactionCount).toBe(7);
     expect(ex.comments.size).toBe(4);
+  });
+});
+
+describe('media URLs never name a person', () => {
+  it('rewrites video permalinks to watch?v=, keeps CDN files, drops anything that could be a profile', () => {
+    expect(safeMediaUrl('https://www.facebook.com/some.person/videos/1234567890123456/?idorvanity=364997627165697', '1')).toBe('https://www.facebook.com/watch/?v=1234567890123456');
+    expect(safeMediaUrl('https://www.facebook.com/some.person/videos/vb.100/1234567890123456/', null)).toBe('https://www.facebook.com/watch/?v=1234567890123456');
+    expect(safeMediaUrl('https://www.facebook.com/watch/?v=42', null)).toBe('https://www.facebook.com/watch/?v=42');
+    expect(safeMediaUrl('https://www.facebook.com/reel/987?s=x', null)).toBe('https://www.facebook.com/reel/987');
+    expect(safeMediaUrl('https://www.facebook.com/photo/?fbid=55&set=a.some.person', null)).toBe('https://www.facebook.com/photo/?fbid=55');
+    expect(safeMediaUrl('https://scontent.fsgn5-13.fna.fbcdn.net/v/t39/1_n.jpg?x=1', null)).toBe('https://scontent.fsgn5-13.fna.fbcdn.net/v/t39/1_n.jpg?x=1');
+    expect(safeMediaUrl('https://www.facebook.com/some.person', null)).toBeNull();
+    expect(safeMediaUrl('https://www.facebook.com/profile.php?id=100000000000001', null)).toBeNull();
+    expect(safeMediaUrl('javascript:alert(1)', null)).toBeNull();
+  });
+});
+
+describe('parser diagnostics', () => {
+  it('summarises structure and typenames without keeping any value', () => {
+    const book = new ShapeBook();
+    book.add({ data: { node: storyNode({ id: '3000000000000001', author: 4, text: 'Secret words', ageDays: 1, mention: 5, reactions: 1, shares: 0, comments: [{ id: '2000000000000009', author: 6, text: 'hidden reply', ageMin: 3 }] }, NOW, { withComments: true }) } });
+    book.add({ '100000000000004': { name: userName(4) }, data: [{ __typename: 'Comment', body: { text: 'hidden' } }] });
+    const out = JSON.stringify(book.summary());
+    expect(out).toContain('"Story"');
+    expect(out).toContain('"Comment"');
+    expect(out).toContain('body.text');
+    expect(out).not.toMatch(/Secret words|hidden|Synthetic Person|3000000000000001|100000000000004|avatar|profile\.php/);
+    expect(out).toContain('<n>'); // an id used as a key is masked
+  });
+
+  it('finds typed nodes nested far below the recorded depth', () => {
+    const book = new ShapeBook();
+    let deep: Record<string, unknown> = { __typename: 'Comment', legacy_fbid: '1', body: { text: 'x' } };
+    for (let i = 0; i < 12; i++) deep = { [`level${i}`]: deep };
+    book.add({ data: deep });
+    const s = book.summary();
+    expect(s.types.Comment?.seen).toBe(1);
+    expect(Object.entries(s.types['(root)']!.paths).find(([, k]) => k.includes('@Comment'))?.[0]).toBe('data.level11.level10.level9.level8.level7.level6.level5.level4.level3.level2.level1.level0');
   });
 });
 
@@ -97,6 +147,20 @@ describe('Facebook mapping and validation', () => {
     const text = '😀 Synthetic Person 9 xin chào';
     const out = pseudonymizeFbText(text, [{ offset: 3, length: 'Synthetic Person 9'.length, entity: { typename: 'User', id: userId(9) } }], p)!;
     expect(out).toBe(`😀 @${p.of('facebook', userId(9))} xin chào`);
+  });
+
+  it('pseudonymises profile links written in the text, keeps group/event/watch links', () => {
+
+    const text = 'Contact https://www.facebook.com/some.person.77/ or fb.com/profile.php?id=100000000000042, m.facebook.com/100000000000043. '
+      + 'Rules: https://www.facebook.com/groups/j2team.community/ event facebook.com/events/123 video https://www.facebook.com/watch/?v=9';
+    const out = pseudonymizeFbText(text, [], p)!;
+    expect(out).not.toMatch(/some\.person|100000000000042|100000000000043/);
+    expect(out).toContain(`https://www.facebook.com/${p.of('facebook-handle', 'some.person.77')}/`);
+    expect(out).toContain(`fb.com/${p.of('facebook', '100000000000042')}`);
+    expect(out).toContain('https://www.facebook.com/groups/j2team.community/');
+    expect(out).toContain('facebook.com/events/123');
+    expect(out).toContain('https://www.facebook.com/watch/?v=9');
+    expect(pseudonymizeFbText(out, [], p)).toBe(out); // stable when applied twice
   });
 
   it('rejects a batch with a record missing its creation time', () => {
@@ -207,7 +271,7 @@ describe('Facebook group collection with a fake browser', () => {
     expect(count(`SELECT COUNT(*) n FROM media_refs WHERE media_type = 'video' AND duration_seconds = 42`)).toBe(1);
     expect(count(`SELECT COUNT(*) n FROM posts WHERE reactions_json LIKE '%"love"%'`)).toBe(9);
     const dump = JSON.stringify(['posts', 'comments', 'raw_payloads', 'pseudonyms', 'media_refs', 'jobs', 'errors', 'sources'].map((t) => app.db.prepare(`SELECT * FROM ${t}`).all()));
-    expect(dump).not.toMatch(/Synthetic Person|avatar\d|profile\.php|1000000000000\d\d(?!\d)/);
+    expect(dump).not.toMatch(/Synthetic Person|synthetic\.uploader|avatar\d|profile\.php|1000000000000\d\d(?!\d)/);
     for (let n = 1; n <= 9; n++) expect(dump).not.toContain(userId(n));
     const reply = app.db.prepare(`SELECT text FROM comments WHERE platform_id = '2000000000000002'`).get() as { text: string };
     expect(reply.text).toBe(`@${app.pseudonymizer().of('facebook', userId(2))} A reply`);
@@ -241,6 +305,34 @@ describe('Facebook group collection with a fake browser', () => {
     startCrawl(app, (app.db.prepare('SELECT id FROM sources').get() as { id: number }).id, 'manual');
     await runAll();
     expect(count(`SELECT COUNT(*) n FROM comments WHERE unavailable_at IS NOT NULL`)).toBe(0);
+  });
+
+  it('a control that loads nothing is clicked only a few times, and the pass is not treated as complete', async () => {
+    addGroup(7);
+    await runAll();
+    const posts = syntheticGroup(NOW);
+    posts[1]!.comments.pop();
+    setup({ posts, deadExpandButton: true });
+    app.db.prepare(`UPDATE posts SET comments_synced_at = '2000-01-01T00:00:00.000Z'`).run();
+    const jobsBefore = fake.actions;
+    startCrawl(app, (app.db.prepare('SELECT id FROM sources').get() as { id: number }).id, 'manual');
+    await runAll();
+    const commentJobs = count(`SELECT COUNT(*) n FROM jobs WHERE type = 'fb.comments' AND state = 'done' AND run_id = 2`);
+    expect(commentJobs).toBeGreaterThan(0);
+    // per post: open + "All comments" + 5 idle clicks at most
+    expect(fake.actions - jobsBefore).toBeLessThanOrEqual(1 + commentJobs * (2 + 5) + 10);
+    expect(count(`SELECT COUNT(*) n FROM comments WHERE unavailable_at IS NOT NULL`)).toBe(0);
+  });
+
+  it('comments that load only as the page scrolls are all collected, and complete posts cost no extra scroll', async () => {
+    setup({ commentsPerScreen: 1 });
+    addGroup(30);
+    await runAll();
+    expect(count('SELECT COUNT(*) n FROM comments')).toBe(13);
+    // Scrolls on post pages: one per extra comment page, plus at most two idle ones per post that still looks short.
+    const postsWithComments = syntheticGroup(NOW).filter((p) => p.comments.length > 1).length;
+    expect(fake.opened.filter((u) => u.includes('/posts/')).length).toBe(9);
+    expect(fake.actions).toBeLessThan(80 + postsWithComments * 2);
   });
 
   it('a checkpoint stops Facebook at once, marks its jobs Paused (Needs user), leaves YouTube running', async () => {
@@ -292,18 +384,70 @@ describe('Facebook group collection with a fake browser', () => {
     expect(count('SELECT COUNT(*) n FROM posts')).toBe(0);
     expect(count(`SELECT COUNT(*) n FROM errors WHERE kind = 'parser'`)).toBe(1);
     expect(platformState(app.db, 'facebook').needs_user).toBe(0); // other sources keep going
+    expect(fake.diagnosed).toHaveLength(1); // a value-free shape summary is saved for the parser fix
   });
 
-  it('pacing caps re-queue the job for later instead of continuing', async () => {
+  it('a listing that fails part-way does not count as a successful crawl (the next run is not incremental)', async () => {
+    const posts = syntheticGroup(NOW);
+    posts[6]!.noTime = true; // on the second screen: the first screen is stored and its comments are fetched
+    setup({ posts });
+    addGroup(30);
+    await runAll();
+    expect(count('SELECT COUNT(*) n FROM posts')).toBeGreaterThan(0);
+    expect(app.db.prepare('SELECT status FROM crawl_runs').get()).toEqual({ status: 'partial' });
+    expect(app.db.prepare('SELECT status, initial_crawl_done, last_success_at FROM sources').get()).toEqual({ status: 'parser_needs_update', initial_crawl_done: 0, last_success_at: null });
+  });
+
+  it('a deeper depth after the first crawl lists back to the new depth on the next run', async () => {
+    addGroup(7);
+    await runAll();
+    const first = count('SELECT COUNT(*) n FROM posts');
+    expect(first).toBeLessThan(9);
+    const id = (app.db.prepare('SELECT id FROM sources').get() as { id: number }).id;
+    expect(updateSource(app, id, { depthDays: 365 }).initial_crawl_done).toBe(0);
+    startCrawl(app, id, 'manual');
+    await runAll();
+    expect(count('SELECT COUNT(*) n FROM posts')).toBe(12); // every synthetic post, including the 200-day-old pinned one
+    expect(updateSource(app, id, { depthDays: 30 }).initial_crawl_done).toBe(1); // shallower: no re-listing
+  });
+
+  it('a listing that reaches the pacing cap waits in place and goes on, without reopening the feed', async () => {
     updateSettings(app.db, { pacing: { facebook: { maxActionsPerHour: 2 } } });
     const pacer = new Pacer(app, { sleep: async () => {} });
     setup({ pacer });
+    const waits: number[] = [];
+    const real = timing.sleep;
+    // Waiting for the cap = the next hour begins: its counter starts empty.
+    timing.sleep = async (ms) => {
+      waits.push(ms);
+      app.db.prepare('DELETE FROM action_counters').run();
+    };
+    try {
+      addGroup(30);
+      await runner.drain();
+    } finally {
+      timing.sleep = real;
+    }
+    expect(waits.length).toBeGreaterThan(0);
+    expect(waits.every((ms) => ms > 0 && ms <= 3600_000 + 600_000)).toBe(true);
+    expect(fake.opened.filter((u) => !u.includes('/posts/'))).toHaveLength(1); // the feed was opened once
+    expect(count('SELECT COUNT(*) n FROM posts')).toBe(9);
+    expect(app.db.prepare(`SELECT state FROM jobs WHERE type = 'fb.group'`).get()).toEqual({ state: 'done' });
+  });
+
+  it('a job that reaches the pacing cap before it holds a place in the feed is re-queued for later', async () => {
     addGroup(30);
+    await runAll();
+    const id = (app.db.prepare('SELECT id FROM sources').get() as { id: number }).id;
+    updateSettings(app.db, { pacing: { facebook: { maxActionsPerHour: 1 } } });
+    setup({ pacer: new Pacer(app, { sleep: async () => {} }) });
+    app.db.prepare(`INSERT INTO action_counters (platform, bucket, count) VALUES ('facebook', ?, 5) ON CONFLICT(platform, bucket) DO UPDATE SET count = 5`).run(`h:${new Date().toISOString().slice(0, 13)}`);
+    startCrawl(app, id, 'manual');
     await runner.drain();
-    const job = app.db.prepare(`SELECT state, next_run_at, last_error FROM jobs WHERE type = 'fb.group'`).get() as { state: string; next_run_at: string; last_error: string };
+    const job = app.db.prepare(`SELECT state, next_run_at, last_error FROM jobs WHERE type = 'fb.group' ORDER BY id DESC LIMIT 1`).get() as { state: string; next_run_at: string; last_error: string };
     expect(job.state).toBe('queued');
     expect(Date.parse(job.next_run_at)).toBeGreaterThan(Date.now());
     expect(job.last_error).toMatch(/pacing/);
-    expect(fake.actions).toBe(2);
+    expect(fake.actions).toBe(0);
   });
 });

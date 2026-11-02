@@ -179,10 +179,13 @@ export function finalizeRunIfDone(db: DB, runId: number): string | null {
   const failed = counts.find((c) => c.state === 'failed')?.n ?? 0;
   const done = counts.find((c) => c.state === 'done')?.n ?? 0;
   const status = failed === 0 ? 'done' : done > 0 ? 'partial' : 'failed';
+  // The first job of a run lists the source. If it failed, posts may have been missed, so the run must not move
+  // last_success_at (the next incremental cutoff) nor finish the initial crawl, even when later jobs succeeded.
+  const root = db.prepare(`SELECT state FROM jobs WHERE run_id = ? ORDER BY id LIMIT 1`).get(runId) as { state: JobState } | undefined;
   const now = nowIso();
   db.transaction(() => {
     db.prepare('UPDATE crawl_runs SET status = ?, finished_at = ? WHERE id = ?').run(status, now, runId);
-    const ok = status !== 'failed';
+    const ok = status !== 'failed' && root?.state === 'done';
     db.prepare(
       `UPDATE sources SET last_run_finished_at = ?, updated_at = ?,
          last_success_at = CASE WHEN ? THEN ? ELSE last_success_at END,

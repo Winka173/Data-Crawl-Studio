@@ -12,7 +12,7 @@ const pacing = z.object({
 
 export const settingsSchema = z.object({
   language: z.enum(['vi', 'en']),
-  defaultDepthDays: z.union([z.literal(7), z.literal(30), z.literal(90), z.null()]),
+  defaultDepthDays: z.union([z.literal(7), z.literal(30), z.literal(90), z.literal(365), z.null()]),
   youtube: z.object({
     dailyQuota: z.number().int().min(100).max(10_000_000),
     reserveUnits: z.number().int().min(0).max(100_000),

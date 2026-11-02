@@ -41,7 +41,7 @@ Bug found and fixed by the tests in this slice:
 | Production build | ✅ | inside `tauri build` |
 | Windows desktop build | ✅ | `npx tauri build`: exe + NSIS |
 | Smoke test of built .exe | ✅ | `npm run smoke -- 1 2 3`: 41/41 checks. Slice 3 part, with the **real** Playwright driver: group link refused before the notice; notice accepted; group added; Chromium downloaded and a visible persistent profile opened; empty profile → no login → Facebook Paused (Needs user), dashboard alert "login_required", 1 job needs_user, source needs_user, 0 posts stored; login entry shows "Expired"; Log out / reset deletes the profile. No request was sent to facebook.com |
-| Real-data test | ⛔ | **Waiting for the owner's Facebook login** (secondary account, via Settings → Accounts & Keys → "Open login window"). Then: crawl one public group with depth 7 days, check the counts, and save scrubbed real payloads as fixtures. Until that test passes, the extraction is **only proven on synthetic data shaped like Facebook's** (see DECISIONS D19). |
+| Real-data test | ✅ partial | **2026-11-02, owner's secondary account, public group "J2TEAM Community" (id 364997627165697).** Run through the worker on the real data folder; Facebook was paused between steps.<br>**Listing:** 145 posts (14-day incremental window), each with group, URL, time, pseudonymous author, text, reactions by type, comment and share counts, and media (261 refs).<br>**Comments, with the final parser (5 posts):** 213 of the 227 comments Facebook reports were stored (94 %), including replies. Per post: 133/139 (70 replies), 56/63 (11 replies), 14/14 (5 replies), 7/8, 3/3.<br>**Totals in the DB:** 238 comments, 87 of them replies; 297 pseudonyms; 0 profile URLs or raw user IDs (scan of every table).<br>**Bugs found and fixed, each now covered by a test:**<ul><li>fractional video durations failed validation;</li><li>video links contained the uploader's vanity name (privacy, D23);</li><li>profile links written in post text (D23);</li><li>a failed listing counted as a successful run (D24);</li><li>a comment became its own parent;</li><li>replies use `comment_direct_parent` and arrive as `Feedback` pages;</li><li>hidden duplicate buttons stopped the expansion;</li><li>comments load on scroll and the pointer must be over the main column (D27);</li><li>a deep listing restarted from the top at the pacing cap (D26).</li></ul>**Still open:** the switch to "All comments" fails (the sort menu does not open), so passes run on "Newest" and deletions are not marked. The 6 % gap is likely comments Facebook hides as possible spam or that were deleted. Real payload *shapes* were captured as value-free summaries (D22); no real payload was saved. |
 
 ## Slice 4: Facebook pages
 ⏳
@@ -56,4 +56,12 @@ Bug found and fixed by the tests in this slice:
 ⏳
 
 ## Slice 8: JSONL/CSV export + local HTTP API
-⏳
+Export part, built early (2026-11-02) because the owner asked for a complete data file. The local HTTP API and docs/API.md are not done yet.
+
+| Check | Status | Evidence |
+|---|---|---|
+| Unit + fixture tests | ✅ | `worker/test/export.test.ts`, 3 tests:<ul><li>JSONL fields, pseudonymous authors, reply tree complete, no raw IDs or names, manifest;</li><li>CSV with BOM, RFC 4180 quoting, formula cells neutralised;</li><li>time-range filter and input validation.</li></ul>Whole suite: 93/93. |
+| TypeScript checks | ✅ | `npm run typecheck`: 0 errors |
+| Production build + Windows build | ✅ | `npm run build` and `npx tauri build`: exe + NSIS (21.9 MiB) |
+| Smoke test of built .exe | ✅ | `npm run smoke -- 2 8`: 22/22 checks. The Exports page exports CSV and JSONL with row counts equal to the DB (7 posts, 157 comments); BOM and header present; manifest correct; no raw viewer IDs; history listed. Screenshot `s8-exports.png`. |
+| Local HTTP API | ⏳ | not started |

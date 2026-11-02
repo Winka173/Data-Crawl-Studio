@@ -126,3 +126,42 @@ Facebook's CSS class names are generated and change constantly. The collector re
   - GraphQL error codes 1357001/1357004 (login), 1675004/1390008 (rate limit) and 368 (policy block), and HTTP 429.
 - **What a stop does:** the whole platform stops, every active job of it becomes Paused (Needs user), and the source and the dashboard show the reason. Nothing touches that platform again until the owner presses Resume.
 - **Pacing:** a random delay between the min and max before *every* action. After every 12–25 actions comes a longer "reading" pause of 3–6× the max delay. Hitting the hourly or daily cap re-queues the job for the next hour (+0–10 min) or the next UTC day.
+
+## D22. Parser diagnostics are value-free shape summaries
+When a Facebook job hits a parser mismatch, or stores far fewer comments than the post reports (fewer than half, when it reports 4 or more), the driver writes a summary of the JSON the page delivered to `logs\fb-shapes\` (the newest 10 are kept).
+- The summary holds only structure: key paths relative to the nearest `__typename`, the kind of each value (string, digits, URL, number, …) and the typenames. It never holds a value. Keys that look like IDs are masked (`<n>`, `<k>`).
+- **Why:** real Facebook payloads are full of names, avatars and profile links, so they cannot be saved as-is. The structure alone is enough to fix the parser and to build synthetic fixtures of the same shape. A unit test checks that no value from a synthetic payload reaches the summary.
+
+## D23. Media URLs never name a person
+A Facebook video permalink is `facebook.com/<uploader's vanity name>/videos/<id>`. Found in the first real crawl, this would have stored a person's profile name.
+- Video links are rewritten to `https://www.facebook.com/watch/?v=<id>`, and photo links to `photo/?fbid=<id>`. Reel links keep only the ID.
+- CDN files (`*.fbcdn.net`) and external preview images are kept.
+- Any other `facebook.com` media URL is dropped, because its path could be a profile.
+
+## D24. A run counts as a success only if its listing job succeeded
+The first job of a run lists the source. If it fails, posts may have been missed. The run then stays `partial`, but it does not move `last_success_at` (the next incremental cutoff) and does not finish the initial crawl. The next run repeats the full depth. Found in the first real crawl.
+
+## D25. A 1-year depth, and deepening a source re-lists it
+The owner asked for one year of a group (2026-11-02), so the depth options are now 7 / 30 / 90 / 365 days / all history.
+- If a source's depth is raised after its first crawl, `initial_crawl_done` is reset. The next run then lists back to the new depth instead of running incrementally.
+- Lowering the depth changes nothing that was already stored.
+
+## D26. A group listing waits for the pacing cap in place
+A Facebook feed cannot be reopened at a given date. A listing that was re-queued by the hourly or daily cap would scroll again from the top and, for a deep window (one year is about 1,000 scrolls, more than the 800-action daily cap), would never reach the end.
+- The listing job therefore keeps its tab and scroll position and sleeps until the cap allows the next action. The platform lane is busy meanwhile, but the cap would block the other Facebook jobs anyway.
+- Every other job is still re-queued for later as before. So is a listing that hits the cap before it has opened the feed.
+- If the app is closed during a listing, the next start lists again from the top. Posts already stored are not lost; they are only scrolled past again.
+
+## D27. Loading every comment (learned from the first real crawl)
+- Only **visible** controls are used. Facebook keeps hidden copies of buttons in the page, and `.first()` used to pick a hidden one and stop.
+- A reply names its parent in `comment_direct_parent` (2026 shape). Replies arrive as pages of the parent's `Feedback`, which points back to its owner through `parent_object_ent`. Back-pointers are never walked, so a comment cannot become its own parent.
+- The permalink page also loads comments as it scrolls. When no "more comments/replies" control is left but fewer comments were captured than the post reports, the job scrolls. It stops after 2 scrolls that add nothing. Posts that are already complete cost no extra action.
+- Five clicks in a row that load nothing end the expansion, and the pass is then not counted as complete.
+- When a post reports replies that were not captured, or far fewer comments than it shows, a diagnostics summary (D22) is written. It includes the texts of the visible comment controls and of the sort menu. Only UI words are kept, and runs of capitalised words are masked.
+
+## D28. Export format
+An export is a folder `exports\export-<time>\` containing `posts`, `comments` and `media` (as `.jsonl` or `.csv`) plus `manifest.json`.
+- **Rows:** comments carry `parent_comment_id` / `root_comment_id` / `depth`, so the reply tree can be rebuilt. People appear only as `author_id = u_…`, and pages and groups as their id and name.
+- **Filter:** posts are chosen by source and publication time. Comments and media follow their posts.
+- **CSV:** RFC 4180 with a UTF-8 BOM (Excel reads Vietnamese correctly). A cell that a spreadsheet would run as a formula gets a leading apostrophe. JSONL keeps the exact text.
+- Field names are a contract (`EXPORT_FORMAT_VERSION = 1`): fields may be added, but never renamed or removed without a version bump.

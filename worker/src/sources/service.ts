@@ -28,7 +28,7 @@ export interface AddResult {
 export function addSources(app: AppContext, opts: { links: string; depthDays?: DepthDays; scheduleMinutes?: number | null }): AddResult {
   const db = app.db;
   const depth = opts.depthDays === undefined ? app.settings().defaultDepthDays : opts.depthDays;
-  if (depth !== null && ![7, 30, 90].includes(depth)) throw new HttpError(400, 'depthDays must be 7, 30, 90 or null');
+  if (depth !== null && ![7, 30, 90, 365].includes(depth)) throw new HttpError(400, 'depthDays must be 7, 30, 90, 365 or null');
   const schedule = opts.scheduleMinutes ?? null;
   if (schedule !== null && (!Number.isInteger(schedule) || schedule < 15)) throw new HttpError(400, 'scheduleMinutes must be >= 15');
   const out: AddResult = { added: [], duplicates: [], errors: [] };
@@ -97,8 +97,13 @@ export function startCrawl(app: AppContext, sourceId: number, trigger: 'add' | '
 export function updateSource(app: AppContext, id: number, patch: { depthDays?: DepthDays; scheduleMinutes?: number | null }): SourceRow {
   getSource(app, id);
   if (patch.depthDays !== undefined) {
-    if (patch.depthDays !== null && ![7, 30, 90].includes(patch.depthDays)) throw new HttpError(400, 'depthDays must be 7, 30, 90 or null');
-    app.db.prepare('UPDATE sources SET depth_days = ?, updated_at = ? WHERE id = ?').run(patch.depthDays, nowIso(), id);
+    if (patch.depthDays !== null && ![7, 30, 90, 365].includes(patch.depthDays)) throw new HttpError(400, 'depthDays must be 7, 30, 90, 365 or null');
+    // A deeper window than before needs a full listing back to the new depth, not an incremental run.
+    const before = getSource(app, id).depth_days;
+    const deeper = before !== null && (patch.depthDays === null || patch.depthDays > before);
+    app.db
+      .prepare(`UPDATE sources SET depth_days = ?, initial_crawl_done = CASE WHEN ? THEN 0 ELSE initial_crawl_done END, updated_at = ? WHERE id = ?`)
+      .run(patch.depthDays, deeper ? 1 : 0, nowIso(), id);
   }
   if (patch.scheduleMinutes !== undefined) {
     const m = patch.scheduleMinutes;
