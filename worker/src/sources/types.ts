@@ -16,6 +16,8 @@ export interface SourceRow {
   status_detail: string | null;
   paused: number;
   initial_crawl_done: number;
+  /** 0 = posts and their counts only; no comment jobs. */
+  collect_comments: number;
   last_run_started_at: string | null;
   last_run_finished_at: string | null;
   last_success_at: string | null;

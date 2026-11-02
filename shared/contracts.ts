@@ -7,7 +7,9 @@ export const PLATFORMS: Platform[] = ['youtube', 'facebook', 'instagram'];
 export type Language = 'vi' | 'en';
 
 /** null = all history */
-export type DepthDays = 7 | 30 | 90 | 365 | null;
+/** Days back for the first crawl (any whole number 1–3650), or null = all history. */
+export type DepthDays = number | null;
+export const MAX_DEPTH_DAYS = 3650;
 export const DEPTH_OPTIONS: DepthDays[] = [7, 30, 90, 365, null];
 
 export interface PacingSettings {
@@ -93,6 +95,7 @@ export interface SourceView {
   status_detail: string | null;
   paused: number;
   initial_crawl_done: number;
+  collect_comments: number;
   last_run_started_at: string | null;
   last_run_finished_at: string | null;
   last_success_at: string | null;

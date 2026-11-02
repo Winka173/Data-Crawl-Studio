@@ -190,10 +190,12 @@ export function finalizeRunIfDone(db: DB, runId: number): string | null {
       `UPDATE sources SET last_run_finished_at = ?, updated_at = ?,
          last_success_at = CASE WHEN ? THEN ? ELSE last_success_at END,
          initial_crawl_done = CASE WHEN ? THEN 1 ELSE initial_crawl_done END,
-         status = CASE WHEN status IN ('parser_needs_update','unavailable','needs_user') THEN status
+         status = CASE WHEN status = 'parser_needs_update' AND ? THEN 'active'
+                       WHEN status IN ('parser_needs_update','unavailable','needs_user') THEN status
                        WHEN paused = 1 THEN 'paused' WHEN ? THEN 'active' ELSE 'error' END
        WHERE id = ?`,
-    ).run(now, now, ok ? 1 : 0, now, ok ? 1 : 0, ok ? 1 : 0, run.source_id);
+      // A run in which every job succeeded shows the parser reads the source again, so its flag is cleared.
+    ).run(now, now, ok ? 1 : 0, now, ok ? 1 : 0, ok && status === 'done' ? 1 : 0, ok ? 1 : 0, run.source_id);
   })();
   return status;
 }

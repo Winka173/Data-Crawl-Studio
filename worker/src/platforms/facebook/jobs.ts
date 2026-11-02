@@ -160,7 +160,7 @@ function storePosts(jc: JobContext, source: SourceRow, container: FbContainer, c
       const r = upsertPost(db, rec, source.id);
       saveRawPayload(db, { platform: 'facebook', entityType: 'post', platformId: rec.platformId, origin: 'network', parserVersion: FB_PARSER_VERSION, payload: rec });
       jc.stats(r.created ? { postsNew: 1 } : r.changed ? { postsUpdated: 1 } : {});
-      if (needsCommentSync(before, rec.commentCount ?? null, rec.publishedAt ?? null, recheckFrom, false)) {
+      if (source.collect_comments && needsCommentSync(before, rec.commentCount ?? null, rec.publishedAt ?? null, recheckFrom, false)) {
         jc.enqueue({ type: JOB_FB_COMMENTS, target: rec.platformId, priority: 100, params: { groupId: container.id, groupName: container.name } });
       }
     }

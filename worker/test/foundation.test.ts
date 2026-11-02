@@ -169,7 +169,7 @@ describe('settings', () => {
     expect(s.pacing.facebook.maxActionsPerHour).toBe(60);
     expect(s.pacing.facebook.minDelayMs).toBe(DEFAULT_SETTINGS.pacing.facebook.minDelayMs);
     expect(() => updateSettings(ctx.db, { pacing: { facebook: { minDelayMs: 50 } } })).toThrow();
-    expect(() => updateSettings(ctx.db, { defaultDepthDays: 45 })).toThrow();
+    expect(() => updateSettings(ctx.db, { defaultDepthDays: 0 })).toThrow();
     expect(getSettings(ctx.db).language).toBe('en');
   });
 });
@@ -220,7 +220,7 @@ describe('control server', () => {
       const bad = await fetch(`${base}/settings`, {
         method: 'PUT',
         headers: { 'X-DCS-Token': server.token, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ defaultDepthDays: 12 }),
+        body: JSON.stringify({ defaultDepthDays: 5000 }),
       });
       expect(bad.status).toBe(400);
     } finally {

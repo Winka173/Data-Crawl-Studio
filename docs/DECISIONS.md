@@ -165,3 +165,9 @@ An export is a folder `exports\export-<time>\` containing `posts`, `comments` an
 - **Filter:** posts are chosen by source and publication time. Comments and media follow their posts.
 - **CSV:** RFC 4180 with a UTF-8 BOM (Excel reads Vietnamese correctly). A cell that a spreadsheet would run as a formula gets a leading apostrophe. JSONL keeps the exact text.
 - Field names are a contract (`EXPORT_FORMAT_VERSION = 1`): fields may be added, but never renamed or removed without a version bump.
+
+## D29. Posts-only sources, and any depth in days
+The owner asked (2026-11-02) for a run without comments and for more control per source.
+- **Comment switch:** every source has `collect_comments`. When it is off, the listing stores posts with their counts (reactions, comments, shares) but never enqueues comment jobs. For Facebook, each post is then not opened, which cuts a year of a busy group from about 65,000 actions to about 1,000. Switching it off cancels comment jobs still waiting; comments already stored are kept.
+- **Depth:** any whole number of days from 1 to 3,650, or all history. 7 / 30 / 90 / 365 stay as presets, and "Custom…" takes a number.
+- **Editing:** depth, schedule and the comment switch can be edited on each source ("Settings" in the Sources table). Raising the depth re-lists the source (D25).

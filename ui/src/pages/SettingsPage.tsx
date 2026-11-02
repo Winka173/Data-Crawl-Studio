@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AppSettings, DepthDays, Language, PacingSettings, WorkerHealth } from '../../../shared/contracts';
-import { DEPTH_OPTIONS } from '../../../shared/contracts';
+import { DepthInput } from '../depth';
 import { get, put } from '../api';
 import { Card, ErrorText, Field } from '../components';
 import { useI18n } from '../i18n';
@@ -135,16 +135,7 @@ function GeneralPanel({ settings, onSettings }: { settings: AppSettings; onSetti
         </select>
       </Field>
       <Field label={t('general.defaultDepth')}>
-        <select
-          value={String(settings.defaultDepthDays)}
-          onChange={(e) => void save({ defaultDepthDays: e.target.value === 'null' ? null : (Number(e.target.value) as DepthDays) })}
-        >
-          {DEPTH_OPTIONS.map((d) => (
-            <option key={String(d)} value={String(d)}>
-              {t(d === null ? 'depth.all' : `depth.${d}`)}
-            </option>
-          ))}
-        </select>
+        <DepthInput value={settings.defaultDepthDays} onChange={(d: DepthDays) => void save({ defaultDepthDays: d })} />
       </Field>
       <ErrorText error={error} />
     </Card>

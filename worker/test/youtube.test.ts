@@ -129,6 +129,14 @@ describe('YouTube collection against the fake API', () => {
   const expectedComments = (maxAgeDays: number) =>
     yt.videos.filter((v) => Date.now() - Date.parse(v.publishedAt) <= maxAgeDays * 86_400_000).reduce((n, v) => n + yt.commentCount(v), 0);
 
+  it('posts only: with comments switched off no comment call is made', async () => {
+    addSources(app, { links: '@fixturechannel', depthDays: 30, collectComments: false });
+    await runAll();
+    expect((app.db.prepare('SELECT COUNT(*) n FROM posts').get() as { n: number }).n).toBe(6);
+    expect((app.db.prepare('SELECT COUNT(*) n FROM comments').get() as { n: number }).n).toBe(0);
+    expect(app.quota.status().byMethod['commentThreads.list'] ?? 0).toBe(0);
+  });
+
   it('first crawl: posts within depth, every comment and reply, privacy, quota accounting', async () => {
     const res = addSources(app, { links: 'https://www.youtube.com/@fixturechannel', depthDays: 30 });
     expect(res.added).toHaveLength(1);

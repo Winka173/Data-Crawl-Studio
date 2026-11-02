@@ -1,4 +1,5 @@
 import type { DepthDays, Platform } from '../../../shared/contracts';
+import { MAX_DEPTH_DAYS } from '../../../shared/contracts';
 import { HttpError } from '../accounts';
 import type { AppContext } from '../context';
 import { log } from '../log';
@@ -25,10 +26,19 @@ export interface AddResult {
   errors: { input: string; code: string }[];
 }
 
-export function addSources(app: AppContext, opts: { links: string; depthDays?: DepthDays; scheduleMinutes?: number | null }): AddResult {
+/** Depth in days: a whole number from 1 to MAX_DEPTH_DAYS, or null for all history. */
+export function checkDepth(depth: unknown): DepthDays {
+  if (depth === null) return null;
+  if (typeof depth !== 'number' || !Number.isInteger(depth) || depth < 1 || depth > MAX_DEPTH_DAYS) {
+    throw new HttpError(400, `depthDays must be a whole number of days from 1 to ${MAX_DEPTH_DAYS}, or null`, 'err.depthInvalid');
+  }
+  return depth;
+}
+
+export function addSources(app: AppContext, opts: { links: string; depthDays?: DepthDays; scheduleMinutes?: number | null; collectComments?: boolean }): AddResult {
   const db = app.db;
-  const depth = opts.depthDays === undefined ? app.settings().defaultDepthDays : opts.depthDays;
-  if (depth !== null && ![7, 30, 90, 365].includes(depth)) throw new HttpError(400, 'depthDays must be 7, 30, 90, 365 or null');
+  const depth = checkDepth(opts.depthDays === undefined ? app.settings().defaultDepthDays : opts.depthDays);
+  const collectComments = opts.collectComments ?? true;
   const schedule = opts.scheduleMinutes ?? null;
   if (schedule !== null && (!Number.isInteger(schedule) || schedule < 15)) throw new HttpError(400, 'scheduleMinutes must be >= 15');
   const out: AddResult = { added: [], duplicates: [], errors: [] };
@@ -60,10 +70,10 @@ export function addSources(app: AppContext, opts: { links: string; depthDays?: D
     const now = nowIso();
     const info = db
       .prepare(
-        `INSERT INTO sources (platform, kind, input_url, platform_id, method, depth_days, schedule_minutes, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)`,
+        `INSERT INTO sources (platform, kind, input_url, platform_id, method, depth_days, schedule_minutes, collect_comments, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)`,
       )
-      .run(link.platform, link.kind, link.normalized, link.ref.by === 'id' ? link.ref.value : null, kind.method, depth, schedule, now, now);
+      .run(link.platform, link.kind, link.normalized, link.ref.by === 'id' ? link.ref.value : null, kind.method, depth, schedule, collectComments ? 1 : 0, now, now);
     const id = Number(info.lastInsertRowid);
     startCrawl(app, id, 'add');
     out.added.push(getSource(app, id));
@@ -94,10 +104,22 @@ export function startCrawl(app: AppContext, sourceId: number, trigger: 'add' | '
   })();
 }
 
-export function updateSource(app: AppContext, id: number, patch: { depthDays?: DepthDays; scheduleMinutes?: number | null }): SourceRow {
+export function updateSource(app: AppContext, id: number, patch: { depthDays?: DepthDays; scheduleMinutes?: number | null; collectComments?: boolean }): SourceRow {
   getSource(app, id);
+  if (patch.collectComments !== undefined) {
+    if (typeof patch.collectComments !== 'boolean') throw new HttpError(400, 'collectComments must be true or false');
+    app.db.transaction(() => {
+      app.db.prepare('UPDATE sources SET collect_comments = ?, updated_at = ? WHERE id = ?').run(patch.collectComments ? 1 : 0, nowIso(), id);
+      // Switching comments off drops the comment work still waiting; what was already stored is kept.
+      if (!patch.collectComments) {
+        app.db
+          .prepare(`UPDATE jobs SET state = 'cancelled', finished_at = ?, updated_at = ? WHERE source_id = ? AND type IN ('fb.comments','yt.comments') AND state IN ('queued','paused','needs_user')`)
+          .run(nowIso(), nowIso(), id);
+      }
+    })();
+  }
   if (patch.depthDays !== undefined) {
-    if (patch.depthDays !== null && ![7, 30, 90, 365].includes(patch.depthDays)) throw new HttpError(400, 'depthDays must be 7, 30, 90, 365 or null');
+    checkDepth(patch.depthDays);
     // A deeper window than before needs a full listing back to the new depth, not an incremental run.
     const before = getSource(app, id).depth_days;
     const deeper = before !== null && (patch.depthDays === null || patch.depthDays > before);

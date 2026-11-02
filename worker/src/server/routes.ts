@@ -46,14 +46,15 @@ export function installCrawlRoutes(r: Router, app: AppContext, runner: QueueRunn
 
   r.get('/sources', () => (db.prepare(`${SOURCE_VIEW_SQL} ORDER BY s.created_at DESC, s.id DESC`).all() as RawSourceView[]).map(toSourceView));
   r.post('/sources', (req) => {
-    const b = (req.body ?? {}) as { links?: unknown; depthDays?: unknown; scheduleMinutes?: unknown };
+    const b = (req.body ?? {}) as { links?: unknown; depthDays?: unknown; scheduleMinutes?: unknown; collectComments?: unknown };
     if (typeof b.links !== 'string') throw new HttpError(400, 'links is required');
-    const res = addSources(app, { links: b.links, depthDays: b.depthDays as never, scheduleMinutes: (b.scheduleMinutes ?? null) as number | null });
+    if (b.collectComments !== undefined && typeof b.collectComments !== 'boolean') throw new HttpError(400, 'collectComments must be true or false');
+    const res = addSources(app, { links: b.links, depthDays: b.depthDays as never, scheduleMinutes: (b.scheduleMinutes ?? null) as number | null, collectComments: b.collectComments as boolean | undefined });
     return { ...res, added: res.added.map((s) => sourceView(app, s.id)) };
   });
   r.patch('/sources/:id', (req) => {
-    const b = (req.body ?? {}) as { depthDays?: unknown; scheduleMinutes?: unknown };
-    updateSource(app, Number(req.params.id), { depthDays: b.depthDays as never, scheduleMinutes: b.scheduleMinutes as never });
+    const b = (req.body ?? {}) as { depthDays?: unknown; scheduleMinutes?: unknown; collectComments?: unknown };
+    updateSource(app, Number(req.params.id), { depthDays: b.depthDays as never, scheduleMinutes: b.scheduleMinutes as never, collectComments: b.collectComments as never });
     return sourceView(app, Number(req.params.id));
   });
   r.delete('/sources/:id', (req) => deleteSource(app, runner, Number(req.params.id), req.query.get('deleteData') === '1'));

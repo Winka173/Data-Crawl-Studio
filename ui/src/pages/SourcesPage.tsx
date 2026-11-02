@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import type { AddSourcesResult, AppSettings, DepthDays, SourceView } from '../../../shared/contracts';
-import { DEPTH_OPTIONS } from '../../../shared/contracts';
-import { del, post } from '../api';
+import { del, patch, post } from '../api';
 import { Card, ErrorText, Field } from '../components';
+import { DepthInput, useDepthLabel } from '../depth';
 import { fmtNum, usePoll } from '../hooks';
 import { formatTime, useI18n } from '../i18n';
 
@@ -14,6 +14,7 @@ export function SourcesPage({ settings }: { settings: AppSettings }) {
   const [links, setLinks] = useState('');
   const [depth, setDepth] = useState<DepthDays>(settings.defaultDepthDays);
   const [schedule, setSchedule] = useState<number | null>(null);
+  const [collectComments, setCollectComments] = useState(true);
   const [result, setResult] = useState<AddSourcesResult | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
@@ -22,7 +23,7 @@ export function SourcesPage({ settings }: { settings: AppSettings }) {
     setBusy(true);
     setError(null);
     try {
-      const r = await post<AddSourcesResult>('/sources', { links, depthDays: depth, scheduleMinutes: schedule });
+      const r = await post<AddSourcesResult>('/sources', { links, depthDays: depth, scheduleMinutes: schedule, collectComments });
       setResult(r);
       if (!r.errors.length) setLinks('');
       else setLinks(r.errors.map((e) => e.input).join('\n'));
@@ -43,22 +44,15 @@ export function SourcesPage({ settings }: { settings: AppSettings }) {
         </Field>
         <div className="form-row">
           <Field label={t('sources.depth')}>
-            <select value={String(depth)} onChange={(e) => setDepth(e.target.value === 'null' ? null : (Number(e.target.value) as DepthDays))} data-testid="depth">
-              {DEPTH_OPTIONS.map((d) => (
-                <option key={String(d)} value={String(d)}>
-                  {t(d === null ? 'depth.all' : `depth.${d}`)}
-                </option>
-              ))}
-            </select>
+            <DepthInput value={depth} onChange={setDepth} testId="depth" />
           </Field>
           <Field label={t('sources.schedule')} hint={t('sources.scheduleHint')}>
-            <select value={String(schedule)} onChange={(e) => setSchedule(e.target.value === 'null' ? null : Number(e.target.value))}>
-              {SCHEDULES.map((m) => (
-                <option key={String(m)} value={String(m)}>
-                  {m === null ? t('sources.scheduleManual') : t('sources.everyHours', { h: m / 60 })}
-                </option>
-              ))}
-            </select>
+            <ScheduleSelect value={schedule} onChange={setSchedule} />
+          </Field>
+          <Field label={t('sources.comments')} hint={t('sources.commentsHint')}>
+            <label className="check">
+              <input type="checkbox" checked={collectComments} onChange={(e) => setCollectComments(e.target.checked)} data-testid="collect-comments" /> {t('sources.collectComments')}
+            </label>
           </Field>
         </div>
         <button className="btn primary" disabled={!links.trim() || busy} onClick={() => void add()} data-testid="add-sources">
@@ -107,8 +101,63 @@ export function SourcesPage({ settings }: { settings: AppSettings }) {
   );
 }
 
+function ScheduleSelect({ value, onChange }: { value: number | null; onChange(m: number | null): void }) {
+  const { t } = useI18n();
+  const options = SCHEDULES.includes(value) ? SCHEDULES : [...SCHEDULES, value];
+  return (
+    <select value={String(value)} onChange={(e) => onChange(e.target.value === 'null' ? null : Number(e.target.value))}>
+      {options.map((m) => (
+        <option key={String(m)} value={String(m)}>
+          {m === null ? t('sources.scheduleManual') : t('sources.everyHours', { h: m / 60 })}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** Inline editor for a source's depth, schedule and comment switch. */
+function SourceSettings({ s, done }: { s: SourceView; done(): void }) {
+  const { t } = useI18n();
+  const [depth, setDepth] = useState<DepthDays>(s.depth_days);
+  const [schedule, setSchedule] = useState<number | null>(s.schedule_minutes);
+  const [comments, setComments] = useState(!!s.collect_comments);
+  const [error, setError] = useState<unknown>(null);
+  const save = async () => {
+    setError(null);
+    try {
+      await patch(`/sources/${s.id}`, { depthDays: depth, scheduleMinutes: schedule, collectComments: comments });
+      done();
+    } catch (e) {
+      setError(e);
+    }
+  };
+  const deeper = s.initial_crawl_done && s.depth_days !== null && (depth === null || depth > s.depth_days);
+  return (
+    <div className="source-settings" data-testid="source-settings">
+      <Field label={t('sources.depth')}>
+        <DepthInput value={depth} onChange={setDepth} testId="edit-depth" />
+      </Field>
+      <Field label={t('sources.schedule')}>
+        <ScheduleSelect value={schedule} onChange={setSchedule} />
+      </Field>
+      <label className="check">
+        <input type="checkbox" checked={comments} onChange={(e) => setComments(e.target.checked)} data-testid="edit-comments" /> {t('sources.collectComments')}
+      </label>
+      {deeper ? <p className="muted small">{t('sources.deeperNote')}</p> : null}
+      {s.collect_comments && !comments ? <p className="muted small">{t('sources.commentsOffNote')}</p> : null}
+      <div className="row-actions tight">
+        <button className="btn small primary" onClick={() => void save()} data-testid="save-source">{t('common.save')}</button>
+        <button className="btn small" onClick={done}>{t('common.cancel')}</button>
+      </div>
+      <ErrorText error={error} />
+    </div>
+  );
+}
+
 function SourceRowView({ s, reload }: { s: SourceView; reload(): void }) {
   const { t, lang } = useI18n();
+  const depthLabel = useDepthLabel();
+  const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [deleteData, setDeleteData] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -132,8 +181,18 @@ function SourceRowView({ s, reload }: { s: SourceView; reload(): void }) {
           </a>
         </div>
         <div className="muted small">
-          {s.kind} · {t('col.depth')}: {s.depth_days === null ? t('depth.all') : t(`depth.${s.depth_days}`)}
+          {s.kind} · {t('col.depth')}: {depthLabel(s.depth_days)}
+          {!s.collect_comments && <> · <span className="tag" data-testid="comments-off">{t('sources.postsOnly')}</span></>}
         </div>
+        {editing && (
+          <SourceSettings
+            s={s}
+            done={() => {
+              setEditing(false);
+              reload();
+            }}
+          />
+        )}
       </td>
       <td>
         <span className={`badge src-${s.status}`} data-testid="source-status">{t(`srcstatus.${s.status}`)}</span>
@@ -158,6 +217,7 @@ function SourceRowView({ s, reload }: { s: SourceView; reload(): void }) {
       <td>
         <div className="row-actions tight">
           <button className="btn small" onClick={() => void act(() => post(`/sources/${s.id}/run`))}>{t('sources.run')}</button>
+          {!editing && <button className="btn small" onClick={() => setEditing(true)} data-testid="edit-source">{t('sources.edit')}</button>}
           {s.paused ? (
             <button className="btn small" onClick={() => void act(() => post(`/sources/${s.id}/resume`))}>{t('sources.resume')}</button>
           ) : (

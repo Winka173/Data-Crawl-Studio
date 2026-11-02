@@ -269,6 +269,13 @@ CREATE TABLE action_counters (
 );
 `,
   },
+  {
+    version: 2,
+    name: 'per-source comment collection switch',
+    sql: `
+ALTER TABLE sources ADD COLUMN collect_comments INTEGER NOT NULL DEFAULT 1;
+`,
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;

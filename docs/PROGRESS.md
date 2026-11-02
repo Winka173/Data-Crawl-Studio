@@ -65,3 +65,11 @@ Export part, built early (2026-11-02) because the owner asked for a complete dat
 | Production build + Windows build | ✅ | `npm run build` and `npx tauri build`: exe + NSIS (21.9 MiB) |
 | Smoke test of built .exe | ✅ | `npm run smoke -- 2 8`: 22/22 checks. The Exports page exports CSV and JSONL with row counts equal to the DB (7 posts, 157 comments); BOM and header present; manifest correct; no raw viewer IDs; history listed. Screenshot `s8-exports.png`. |
 | Local HTTP API | ⏳ | not started |
+
+### Per-source options (2026-11-02, owner request)
+| Check | Status | Evidence |
+|---|---|---|
+| Unit + fixture tests | ✅ | `npm test`: 97/97.<ul><li>posts only: Facebook opens no post and stores no comment, but the counts are kept;</li><li>YouTube makes no `commentThreads.list` call;</li><li>switching comments off cancels waiting comment jobs and keeps stored comments;</li><li>depth accepts any whole number 1–3650 and rejects 0, 3651, 1.5 and "30";</li><li>raising the depth re-lists the source;</li><li>a clean run clears "Parser needs update".</li></ul> |
+| TypeScript, builds | ✅ | typecheck 0 errors; `npm run build` and `npx tauri build` succeeded |
+| Smoke test of built .exe | ✅ | `npm run smoke -- 1 2 3 8`: 48/48. In the Sources table, "Settings" set custom depth 45 days and comments off; the row shows "Độ sâu: 45 ngày · chỉ bài viết", and the DB has `depth_days=45, collect_comments=0` (screenshot `s8-source-settings.png`) |
+| Migration on the owner's DB | ✅ | v1 → v2 on the real database. Backup written first: `backups\datacrawl-v1-2026-11-02T12-05-21-194Z.db` |

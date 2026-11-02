@@ -1,6 +1,6 @@
 # Database schema (SQLite)
 
-File: `%LOCALAPPDATA%\DataCrawlStudio\db\datacrawl.db` (WAL mode). Schema version: `PRAGMA user_version` (currently **1**).
+File: `%LOCALAPPDATA%\DataCrawlStudio\db\datacrawl.db` (WAL mode). Schema version: `PRAGMA user_version` (currently **2**). v2 added `sources.collect_comments`.
 
 ## Conventions for the analytics app
 - **Timestamps** are UTC ISO-8601 strings with milliseconds and a `Z` suffix (`2026-11-02T07:30:00.000Z`). They compare correctly as text.
@@ -45,7 +45,8 @@ Every crawled source: a channel, playlist, video, group, page or IG account.
 | schedule_minutes | INTEGER | incremental update interval; NULL = manual only |
 | status, status_detail | TEXT | current state and a human-readable reason |
 | paused | INTEGER 0/1 | paused by the user |
-| initial_crawl_done | INTEGER 0/1 | first crawl finished; later runs are incremental |
+| initial_crawl_done | INTEGER 0/1 | first crawl finished; later runs are incremental. Reset to 0 when the depth is raised |
+| collect_comments | INTEGER 0/1 | 1 (default): comments and replies are collected; 0: posts and their counts only |
 | last_run_started_at, last_run_finished_at, last_success_at, next_run_at | TEXT | |
 | created_at, updated_at | TEXT | |
 

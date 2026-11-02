@@ -10,7 +10,7 @@ import '../src/platforms/youtube/jobs';
 import { ShapeBook } from '../src/browser/shapes';
 import { Pseudonymizer } from '../src/privacy/pseudonym';
 import { ParserError, PacingWaitError } from '../src/queue/errors';
-import { platformState, resumePlatform } from '../src/queue/queue';
+import { enqueue, platformState, resumePlatform } from '../src/queue/queue';
 import { QueueRunner } from '../src/queue/runner';
 import { addSources, startCrawl, updateSource } from '../src/sources/service';
 import { updateSettings } from '../src/settings';
@@ -335,6 +335,37 @@ describe('Facebook group collection with a fake browser', () => {
     expect(fake.actions).toBeLessThan(80 + postsWithComments * 2);
   });
 
+  it('posts only: with comments switched off no post is opened and no comment is stored', async () => {
+    const res = addSources(app, { links: `https://www.facebook.com/groups/${GROUP_SLUG}/`, depthDays: 45, collectComments: false });
+    expect(res.added[0]).toMatchObject({ depth_days: 45, collect_comments: 0 });
+    await runAll();
+    expect(count('SELECT COUNT(*) n FROM posts')).toBe(10); // the posts younger than 45 days (the 45-day one sits just past the cutoff)
+    expect(count(`SELECT COUNT(*) n FROM posts WHERE comment_count > 0`)).toBeGreaterThan(0); // the counts are still there
+    expect(count('SELECT COUNT(*) n FROM comments')).toBe(0);
+    expect(count(`SELECT COUNT(*) n FROM jobs WHERE type = 'fb.comments'`)).toBe(0);
+    expect(fake.opened.some((u) => u.includes('/posts/'))).toBe(false);
+    expect(app.db.prepare('SELECT status FROM crawl_runs').get()).toEqual({ status: 'done' });
+  });
+
+  it('switching comments off drops waiting comment jobs and keeps stored comments', async () => {
+    const id = addGroup(30).added[0]!.id;
+    await runAll();
+    const stored = count('SELECT COUNT(*) n FROM comments');
+    const runId = startCrawl(app, id, 'manual');
+    for (const t of ['a', 'b', 'c']) enqueue(app.db, { platform: 'facebook', type: 'fb.comments', sourceId: id, runId, target: t });
+    expect(count(`SELECT COUNT(*) n FROM jobs WHERE type = 'fb.comments' AND state = 'queued'`)).toBe(3);
+    expect(updateSource(app, id, { collectComments: false }).collect_comments).toBe(0);
+    expect(count(`SELECT COUNT(*) n FROM jobs WHERE type = 'fb.comments' AND state = 'queued'`)).toBe(0);
+    expect(count('SELECT COUNT(*) n FROM comments')).toBe(stored);
+  });
+
+  it('accepts any whole number of days as depth, and rejects the rest', () => {
+    expect(addSources(app, { links: 'https://www.facebook.com/groups/111/', depthDays: 730 }).added[0]?.depth_days).toBe(730);
+    for (const bad of [0, -1, 3651, 1.5, '30' as never]) {
+      expect(() => addSources(app, { links: 'https://www.facebook.com/groups/222/', depthDays: bad })).toThrow(/depthDays/);
+    }
+  });
+
   it('a checkpoint stops Facebook at once, marks its jobs Paused (Needs user), leaves YouTube running', async () => {
     const yt = new FakeYoutube(NOW);
     app.fetch = yt.fetch as typeof fetch;
@@ -385,6 +416,12 @@ describe('Facebook group collection with a fake browser', () => {
     expect(count(`SELECT COUNT(*) n FROM errors WHERE kind = 'parser'`)).toBe(1);
     expect(platformState(app.db, 'facebook').needs_user).toBe(0); // other sources keep going
     expect(fake.diagnosed).toHaveLength(1); // a value-free shape summary is saved for the parser fix
+
+    // After the parser is fixed, a run in which every job succeeds clears the flag.
+    setup();
+    startCrawl(app, (app.db.prepare('SELECT id FROM sources').get() as { id: number }).id, 'manual');
+    await runAll();
+    expect(app.db.prepare('SELECT status, initial_crawl_done FROM sources').get()).toEqual({ status: 'active', initial_crawl_done: 1 });
   });
 
   it('a listing that fails part-way does not count as a successful crawl (the next run is not incremental)', async () => {

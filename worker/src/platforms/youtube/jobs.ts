@@ -181,7 +181,7 @@ async function syncVideos(jc: JobContext, source: SourceRow, ids: string[], owne
     if (source.kind === 'yt_video' && !source.name) {
       db.prepare('UPDATE sources SET name = ?, updated_at = ? WHERE id = ?').run(v.snippet?.title ?? null, nowIso(), source.id);
     }
-    if (needsCommentSync(before, record.commentCount ?? null, record.publishedAt ?? null, recheckFrom, always)) {
+    if (source.collect_comments && needsCommentSync(before, record.commentCount ?? null, record.publishedAt ?? null, recheckFrom, always)) {
       jc.enqueue({ type: JOB_COMMENTS, target: v.id, priority: 100, params: { owner: vOwner } });
     }
   }

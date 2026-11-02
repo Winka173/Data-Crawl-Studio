@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { AppSettings } from '../../shared/contracts';
+import { MAX_DEPTH_DAYS } from '../../shared/contracts';
 import type { DB } from './db/db';
 import { nowIso } from './util/time';
 
@@ -12,7 +13,7 @@ const pacing = z.object({
 
 export const settingsSchema = z.object({
   language: z.enum(['vi', 'en']),
-  defaultDepthDays: z.union([z.literal(7), z.literal(30), z.literal(90), z.literal(365), z.null()]),
+  defaultDepthDays: z.number().int().min(1).max(MAX_DEPTH_DAYS).nullable(),
   youtube: z.object({
     dailyQuota: z.number().int().min(100).max(10_000_000),
     reserveUnits: z.number().int().min(0).max(100_000),
