@@ -3,20 +3,23 @@ import type { AccountEntryView } from '../../../shared/contracts';
 import { del, get, post, put } from '../api';
 import { Card, CopyButton, ErrorText, StatusBadge } from '../components';
 import { formatTime, useI18n } from '../i18n';
+import { BrowserCard, BrowserNotice, useBrowserNotice } from './BrowserCard';
 
 export function AccountsPanel() {
   const { t } = useI18n();
   const [entries, setEntries] = useState<AccountEntryView[]>([]);
   const load = useCallback(() => void get<AccountEntryView[]>('/accounts').then(setEntries), []);
   useEffect(load, [load]);
+  const notice = useBrowserNotice();
 
   return (
     <div>
       <p className="muted">{t('acc.intro')}</p>
+      {notice.loaded && !notice.accepted && <BrowserNotice onAccepted={() => (notice.reload(), load())} />}
       <div className="stack">
-        {entries.map((e) => (
-          <AccountCard key={e.key} entry={e} reload={load} />
-        ))}
+        {entries.map((e) =>
+          e.kind === 'browserProfile' ? <BrowserCard key={e.key} entry={e} reload={load} /> : <AccountCard key={e.key} entry={e} reload={load} />,
+        )}
       </div>
     </div>
   );
@@ -165,15 +168,7 @@ function AccountCard({ entry, reload }: { entry: AccountEntryView; reload(): voi
         </div>
       )}
 
-      {entry.kind === 'browserProfile' && <p className="muted small">{t('acc.browserLater')}</p>}
-
       <div className="row-actions">
-        {entry.kind === 'browserProfile' && (
-          <>
-            <button className="btn" disabled>{t('acc.openLogin')}</button>
-            <button className="btn" disabled>{t('acc.resetProfile')}</button>
-          </>
-        )}
         {entry.kind === 'generatedToken' && (
           <button className="btn primary" disabled={!!busy} onClick={() => void generate()}>
             {entry.status === 'not_set' ? t('acc.generate') : t('acc.regenerate')}

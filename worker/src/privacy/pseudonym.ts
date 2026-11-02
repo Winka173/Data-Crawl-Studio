@@ -64,6 +64,8 @@ export interface MentionContext {
   publicHandles?: Set<string>;
 }
 
+const PSEUDONYM = /^u_[0-9a-f]{16}$/;
+
 // @handle: letters, digits, dot, underscore, hyphen (YouTube/Instagram handle alphabet), at a word start.
 const MENTION = /(^|[^\w@.])@([\p{L}\p{N}_][\p{L}\p{N}._-]{0,99})/gu;
 
@@ -77,7 +79,7 @@ export function pseudonymizeMentions(text: string, ctx: MentionContext, p: Pseud
     const trimmed = handle.replace(/[._-]+$/, '');
     const trail = handle.slice(trimmed.length);
     const key = trimmed.toLowerCase();
-    if (ctx.publicHandles?.has(key)) return `${lead}@${trimmed}${trail}`;
+    if (ctx.publicHandles?.has(key) || PSEUDONYM.test(trimmed)) return `${lead}@${trimmed}${trail}`;
     const userId = ctx.knownHandles?.get(key);
     const pseudo = userId ? p.of(ctx.platform, userId) : p.of(`${ctx.platform}-handle`, key);
     return `${lead}@${pseudo}${trail}`;

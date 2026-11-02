@@ -28,7 +28,8 @@ export function resolvePaths(dataDir = defaultDataDir()): AppPaths {
     logsDir: path.join(dataDir, 'logs'),
     profilesDir: path.join(dataDir, 'profiles'),
     exportsDir: path.join(dataDir, 'exports'),
-    browsersDir: path.join(dataDir, 'ms-playwright'),
+    // Tests may share one browser download between scratch data folders.
+    browsersDir: process.env.DCS_BROWSERS_DIR ? path.resolve(process.env.DCS_BROWSERS_DIR) : path.join(dataDir, 'ms-playwright'),
     secretsPath: path.join(dataDir, 'secrets.json'),
     lockPath: path.join(dataDir, 'worker.lock'),
   };

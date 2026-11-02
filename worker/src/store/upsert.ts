@@ -235,6 +235,13 @@ export function markUnseenComments(db: DB, postId: number, parentId: number | nu
   return info.changes;
 }
 
+/** After a COMPLETE pass over a post's whole comment tree: every comment not seen since `passStartedAt` is gone. */
+export function markUnseenCommentsOfPost(db: DB, postId: number, passStartedAt: string, now = nowIso()): number {
+  return db
+    .prepare(`UPDATE comments SET unavailable_at = ?, updated_at = ? WHERE post_id = ? AND last_seen_at < ? AND unavailable_at IS NULL`)
+    .run(now, now, postId, passStartedAt).changes;
+}
+
 export function markPostUnavailable(db: DB, platform: string, platformId: string, reason: string, now = nowIso()): boolean {
   const info = db
     .prepare('UPDATE posts SET unavailable_at = ?, unavailable_reason = ?, updated_at = ? WHERE platform = ? AND platform_id = ? AND unavailable_at IS NULL')

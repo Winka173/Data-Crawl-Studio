@@ -3,10 +3,15 @@ import { openDatabase } from './db/db';
 import { acquireLock } from './lock';
 import { log } from './log';
 import { ensureDirs, resolvePaths } from './paths';
+import { Pacer } from './browser/pacing';
+import { BrowserManager } from './browser/session';
+import { PlaywrightFbDriver } from './platforms/facebook/driver';
+import { setFbDriver } from './platforms/facebook/jobs';
 import './platforms/youtube/jobs';
 import { QueueRunner } from './queue/runner';
 import { SecretStore } from './secrets/store';
 import { buildControlRouter, startControlServer } from './server/control';
+import { installBrowserRoutes } from './server/browserRoutes';
 import { installCrawlRoutes } from './server/routes';
 
 declare const __DCS_VERSION__: string | undefined;
@@ -26,7 +31,13 @@ async function main(): Promise<void> {
   ctx.pseudonymizer(); // creates the salt on first run so its status is visible in Accounts & Keys
 
   const runner = new QueueRunner(ctx);
-  const server = await startControlServer(buildControlRouter(ctx, [(r) => installCrawlRoutes(r, ctx, runner)]), {
+  const browser = new BrowserManager(ctx);
+  const pacer = new Pacer(ctx);
+  pacer.prune();
+  const fbDriver = new PlaywrightFbDriver(browser, pacer);
+  setFbDriver(() => fbDriver, () => browser.writeStatus('facebook', { lastCrawlOkAt: new Date().toISOString(), loginWall: false }));
+
+  const server = await startControlServer(buildControlRouter(ctx, [(r) => installCrawlRoutes(r, ctx, runner), (r) => installBrowserRoutes(r, ctx, browser)]), {
     port: process.env.DCS_CONTROL_PORT ? Number(process.env.DCS_CONTROL_PORT) : undefined,
     token: process.env.DCS_CONTROL_TOKEN,
   });
@@ -39,6 +50,7 @@ async function main(): Promise<void> {
     log.info('worker stopping', { why });
     // Running jobs are aborted and re-queued with their cursor; they resume on next start.
     await runner.stop().catch((e) => log.error('queue stop failed', e));
+    await browser.closeAll().catch((e) => log.error('browser close failed', e));
     await server.close();
     db.close();
     releaseLock();

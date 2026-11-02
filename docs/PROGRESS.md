@@ -33,8 +33,15 @@ Bug found and fixed by the tests in this slice:
 - The quota reset time drifted by seconds between calls.
 - A missing query parameter meant `LIMIT 0` on post comments.
 
-## Slice 3: Facebook public groups via the browser
-⏳
+## Slice 3: Facebook public groups via the browser (2026-11-02)
+| Check | Status | Evidence |
+|---|---|---|
+| Unit + fixture tests | ✅ (synthetic) | `npm test`: 80/80 passed. The 28 new Facebook tests cover: multi-document/guarded JSON; comment-id decoding; story extraction (author, time, text, mention ranges, reactions by type, shares, photos/video, shared story ignored); comment tree to depth 2; later sightings refresh counts; mapping (people → pseudonyms, Page → entity, UTF-16 mention offsets, no double pseudonymisation); validation failure → ParserError. They also cover block detection (7 EN/VI cases, plain post text is not a block, API codes, HTTP 429) and pacing (delay range, hourly and daily caps → wait until the next hour/day, long reading pause). With a fake browser, through the real queue: notice gate; first crawl past an old pinned post (9 posts, 13 comments, depth-2 reply, Page reply kept as entity, carousel/video media, no names or user IDs in any table); deleted comment marked only on a complete pass, never without "All comments"; checkpoint → Facebook stopped, jobs Paused (Needs user), no further Facebook actions, YouTube keeps running, Resume completes the crawl; GraphQL rate-limit error → stop; no login → stop before any action; layout change → "Parser needs update", nothing stored; pacing cap → re-queued |
+| TypeScript checks | ✅ | `npm run typecheck`: 0 errors |
+| Production build | ✅ | inside `tauri build` |
+| Windows desktop build | ✅ | `npx tauri build`: exe + NSIS |
+| Smoke test of built .exe | ✅ | `npm run smoke -- 1 2 3`: 41/41 checks. Slice 3 part, with the **real** Playwright driver: group link refused before the notice; notice accepted; group added; Chromium downloaded and a visible persistent profile opened; empty profile → no login → Facebook Paused (Needs user), dashboard alert "login_required", 1 job needs_user, source needs_user, 0 posts stored; login entry shows "Expired"; Log out / reset deletes the profile. No request was sent to facebook.com |
+| Real-data test | ⛔ | **Waiting for the owner's Facebook login** (secondary account, via Settings → Accounts & Keys → "Open login window"). Then: crawl one public group with depth 7 days, check the counts, and save scrubbed real payloads as fixtures. Until that test passes, the extraction is **only proven on synthetic data shaped like Facebook's** (see DECISIONS D19). |
 
 ## Slice 4: Facebook pages
 ⏳

@@ -95,3 +95,34 @@ Comment payloads drop the author name, avatar and channel URL, the author ID bec
 
 ## D17. Test-only API base override
 `DCS_YOUTUBE_API_BASE` points the collector at a local fake server (`scripts/fake-youtube-server.ts`, synthetic data only). The smoke test uses it to drive a full crawl through the built `.exe`. Normal use never sets it.
+
+## D18. Browser: one visible, persistent Playwright Chromium profile per platform
+- **Profiles** live at `profiles\facebook` and `profiles\instagram`.
+- **Chromium** is Playwright's own build. It is downloaded once, on first use, into `ms-playwright\`. playwright-core is loaded lazily, so the worker starts light.
+- **The window is always visible:** collection and login use the same visible window. The owner can watch it, and it is already on screen when a checkpoint needs solving. There is no headless mode, stealth plugin, fingerprint change, proxy or second account.
+- **Login check:** only the *presence* of the login cookie is checked (`c_user` on Facebook, `sessionid` on Instagram). Cookie values never leave the browser.
+- **Log out / reset** deletes the profile folder.
+
+## D19. Facebook extraction reads the page's own JSON, not obfuscated DOM classes
+Facebook's CSS class names are generated and change constantly. The collector reads the JSON the page itself receives: GraphQL responses and the data embedded in `<script type="application/json">`. A tree walker collects `Story`, `Comment` and `Group` nodes wherever they are nested.
+- The DOM is used only to *drive* the page: open, scroll, switch to "All comments", click "more comments/replies". Matching is by role plus English/Vietnamese text.
+- All selectors and data assumptions live in `worker/src/platforms/facebook/extract.ts`, versioned as `FB_PARSER_VERSION`.
+- Every record is validated: zod schema, creation time present, author present for posts. If a batch fails, nothing from it is stored and the source is flagged **Parser needs update**. The same happens when the page shows posts but none can be extracted.
+- **Limitation, stated plainly:** until the owner logs in, the extraction has only been tested on synthetic JSON shaped like Facebook's. The first real crawl will show whether the shapes match. Real payloads will then be saved as scrubbed fixtures, with names and IDs replaced, and the parser adjusted.
+
+## D20. Facebook group collection rules
+- The feed is opened sorted chronologically (`?sorting_setting=CHRONOLOGICAL`) and scrolled.
+- **Where the listing stops:** after **3 consecutive posts** older than the cutoff (pinned old posts at the top do not end it), after 4 scrolls with nothing new, or at 400 scrolls.
+- **Comments:** each post's permalink is opened, the list is switched to **All comments** (Facebook defaults to "Most relevant", which hides some), and every "more comments / replies" control is clicked, one paced action each, up to 600 clicks.
+- **Deletions** are marked only after a *complete* pass. A pass is complete when "All comments" was set, nothing was left to expand, and no comment was missing its parent. Otherwise comments are stored but nothing is marked deleted.
+- Facebook comments nest up to depth 2 (reply to a reply). The parent chain is kept. A comment whose parent was not captured is not stored detached.
+- People are pseudonymised: post and comment authors, plus people tagged in the text (using Facebook's mention ranges, UTF-16 offsets). Pages and the group itself are public entities.
+- The raw payload stored for Facebook is the normalised record only. Facebook's JSON contains names, avatars and profile URLs.
+
+## D21. Stop rules (block detection) and pacing details
+- **What stops collection:**
+  - Checkpoint, two-factor, challenge, CAPTCHA or login URLs.
+  - "Temporarily blocked", "suspected automated behavior", "account locked", "security check", "log in to continue", "please wait a few minutes" in English or Vietnamese. Only dialog/alert text and the page title are checked, plus the body when no feed is present, so words inside ordinary posts never trigger a stop.
+  - GraphQL error codes 1357001/1357004 (login), 1675004/1390008 (rate limit) and 368 (policy block), and HTTP 429.
+- **What a stop does:** the whole platform stops, every active job of it becomes Paused (Needs user), and the source and the dashboard show the reason. Nothing touches that platform again until the owner presses Resume.
+- **Pacing:** a random delay between the min and max before *every* action. After every 12–25 actions comes a longer "reading" pause of 3–6× the max delay. Hitting the hourly or daily cap re-queues the job for the next hour (+0–10 min) or the next UTC day.
