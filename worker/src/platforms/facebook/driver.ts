@@ -33,6 +33,20 @@ export interface FbDriver {
   diagnose?(reason: string, extra?: Record<string, unknown>): Promise<string | null>;
 }
 
+/**
+ * Photos and videos of posts (scontent / video *.fbcdn.net). The collector reads media URLs from the page's JSON and
+ * never needs the files; loading them made a long feed tab grow by ~400 MB a minute on a real group. Interface
+ * images (static.*.fbcdn.net) and anything on facebook.com (e.g. a checkpoint's CAPTCHA) still load.
+ */
+export function isPostMedia(url: string, resourceType: string): boolean {
+  if (resourceType !== 'image' && resourceType !== 'media') return false;
+  try {
+    return /^(scontent|video)[\w.-]*\.fbcdn\.net$/.test(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export class PlaywrightFbDriver implements FbDriver {
   private pending: Promise<void>[] = [];
   private bodies: { status: number; text: string }[] = [];
@@ -58,6 +72,10 @@ export class PlaywrightFbDriver implements FbDriver {
     if (this.page && !this.page.isClosed()) return this.page;
     this.page = await this.browser.page('facebook');
     this.page.on('response', this.listener);
+    await this.page.route(
+      (u) => /\.fbcdn\.net$/.test(u.hostname),
+      (route) => (isPostMedia(route.request().url(), route.request().resourceType()) ? route.abort('blockedbyclient') : route.continue()),
+    );
     return this.page;
   }
 

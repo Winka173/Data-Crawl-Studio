@@ -3,6 +3,7 @@ import { setSecret } from '../src/accounts';
 import { Pacer } from '../src/browser/pacing';
 import type { AppContext } from '../src/context';
 import { detectBlockInPage, detectBlockInResponse } from '../src/platforms/facebook/detect';
+import { isPostMedia } from '../src/platforms/facebook/driver';
 import { decodeCommentId, extractFrom, parseJsonDocuments, safeMediaUrl } from '../src/platforms/facebook/extract';
 import { orderByParent, setFbDriver, timing } from '../src/platforms/facebook/jobs';
 import { mapFbPost, pseudonymizeFbText, validateBatch } from '../src/platforms/facebook/map';
@@ -102,6 +103,17 @@ describe('media URLs never name a person', () => {
     expect(safeMediaUrl('https://www.facebook.com/some.person', null)).toBeNull();
     expect(safeMediaUrl('https://www.facebook.com/profile.php?id=100000000000001', null)).toBeNull();
     expect(safeMediaUrl('javascript:alert(1)', null)).toBeNull();
+  });
+});
+
+describe('browser tab resources', () => {
+  it('blocks post photos and videos only; interface images and facebook.com still load', () => {
+    expect(isPostMedia('https://scontent.fsgn5-13.fna.fbcdn.net/v/t39/1_n.jpg?x=1', 'image')).toBe(true);
+    expect(isPostMedia('https://video.fsgn5-1.fna.fbcdn.net/o1/v/t2/f2/m69/abc.mp4', 'media')).toBe(true);
+    expect(isPostMedia('https://static.xx.fbcdn.net/rsrc.php/v3/icon.png', 'image')).toBe(false);
+    expect(isPostMedia('https://www.facebook.com/captcha/tfbimage/?x=1', 'image')).toBe(false);
+    expect(isPostMedia('https://scontent.fsgn5-13.fna.fbcdn.net/v/t39/1_n.jpg', 'xhr')).toBe(false);
+    expect(isPostMedia('not a url', 'image')).toBe(false);
   });
 });
 
